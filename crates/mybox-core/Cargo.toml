@@ -1,0 +1,21 @@
+[package]
+name = "mybox-core"
+version = "0.1.0"
+edition = "2021"
+description = "mybox framework core: Module trait, event bus, window/hotkey/tray/config services, renderer abstraction"
+
+[dependencies]
+winit = { workspace = true }
+tiny-skia = { workspace = true }
+softbuffer = { workspace = true }
+global-hotkey = { workspace = true }
+tray-icon = { workspace = true }
+crossbeam-channel = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+directories = { workspace = true }
+parking_lot = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }

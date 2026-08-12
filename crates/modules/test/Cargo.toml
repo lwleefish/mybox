@@ -1,0 +1,8 @@
+[package]
+name = "mybox-test"
+version = "0.1.0"
+edition = "2021"
+description = "Test module used to validate the mybox module framework"
+
+[dependencies]
+mybox-core = { path = "../../mybox-core" }

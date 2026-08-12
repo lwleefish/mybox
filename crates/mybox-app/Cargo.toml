@@ -1,0 +1,11 @@
+[package]
+name = "mybox-app"
+version = "0.1.0"
+edition = "2021"
+description = "mybox application entry point: assembles framework + modules and runs the event loop"
+
+[dependencies]
+mybox-core = { path = "../mybox-core" }
+mybox-test = { path = "../modules/test" }
+anyhow = { workspace = true }
+env_logger = { workspace = true }
