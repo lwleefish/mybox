@@ -18,6 +18,16 @@
 //! - A worker thread's `send()` does **not** wake a `ControlFlow::Wait` loop, so
 //!   `WindowManagerHandle::create/destroy` fire a wake hook (W3) that the App
 //!   installs in [`App::run`] to pulse `AppEvent::WindowRequested`.
+//!
+//! # Quit handling (N2)
+//!
+//! `PredefinedMenuItem::quit` is handled natively by macOS (it sends `terminate:`
+//! to `NSApp`, ending the process) — the App does **not** wire the quit menu to
+//! `event_loop.exit()`. The 01-04-05 manual checklist ("退出菜单项退出应用")
+//! relies on this native behavior. If a future platform (Windows) does not
+//! terminate natively, the quit menu id should map to bus
+//! `FrameworkEvent::AppExit` and the App should call `event_loop.exit()` on it —
+//! recorded as a v2 item, not implemented in Phase 1.
 
 use std::sync::Arc;
 
