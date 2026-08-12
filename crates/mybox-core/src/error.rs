@@ -30,6 +30,9 @@ pub enum MyboxError {
     /// Tray icon/menu error.
     #[error("tray error: {0}")]
     Tray(String),
+    /// Module registration or lifecycle error.
+    #[error("module error: {0}")]
+    Module(String),
 }
 
 /// Convenience alias used throughout the framework.
