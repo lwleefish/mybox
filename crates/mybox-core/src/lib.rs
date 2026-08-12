@@ -4,3 +4,4 @@
 //! modules are added here as they land.
 
 pub mod error;
+pub mod event;
