@@ -15,8 +15,8 @@ use crate::window::WindowManagerHandle;
 /// The object handed to `Module::init`. Modules interact with the framework
 /// exclusively through this context.
 ///
-/// `#[allow(dead_code)]`: `windows` is consumed by the `windows()` accessor in
-/// 01-02-04; `config`/`hotkeys` by 01-03; `new` (below) by the 01-04 App.
+/// `#[allow(dead_code)]`: `config`/`hotkeys` are consumed by 01-03's accessors;
+/// `new` (below) is called by the 01-04 App.
 #[allow(dead_code)]
 pub struct ModuleContext {
     pub(crate) bus: Arc<EventBus>,
@@ -62,6 +62,11 @@ impl ModuleContext {
     /// Forward closures to the winit main thread (D-04 reconciliation).
     pub fn ui(&self) -> &UiThreadProxy {
         &self.ui
+    }
+
+    /// Enqueue window create/destroy requests (executed on the main thread).
+    pub fn windows(&self) -> &WindowManagerHandle {
+        &self.windows
     }
 }
 
@@ -122,6 +127,65 @@ impl Default for UiThreadProxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ConfigCenter;
+    use crate::event::{Event, EventFilter, EventPayload};
+    use crate::hotkey::HotkeyManager;
+    use crate::window::WindowManagerHandle;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Assemble a context with all core services (the same assembly the 01-04
+    /// App will do at runtime).
+    fn sample_context() -> ModuleContext {
+        ModuleContext::new(
+            Arc::new(EventBus::new()),
+            Arc::new(WindowManagerHandle::new()),
+            Arc::new(ConfigCenter::default()),
+            Arc::new(HotkeyManager::default()),
+            UiThreadProxy::new(),
+        )
+    }
+
+    fn wait_until(cond: impl Fn() -> bool) -> bool {
+        for _ in 0..200 {
+            if cond() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    #[test]
+    fn emit_and_on_round_trip_through_context() {
+        let ctx = sample_context();
+        let got = Arc::new(AtomicUsize::new(0));
+        let g = got.clone();
+        ctx.on(
+            EventFilter::kind("capture", "*"),
+            Box::new(move |_| {
+                g.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        ctx.emit(Event {
+            from: "capture",
+            kind: "screenshot-taken",
+            payload: EventPayload::Module(serde_json::Value::Null),
+        });
+        assert!(wait_until(|| got.load(Ordering::SeqCst) == 1), "context emit never dispatched");
+    }
+
+    #[test]
+    fn ui_and_windows_accessors_return_services() {
+        let ctx = sample_context();
+        // ui() returns the UiThreadProxy; windows() the WindowManagerHandle.
+        // Both are used through their own APIs (run/drain, create/try_recv).
+        ctx.ui().run(Box::new(|| {}));
+        ctx.windows().create(crate::window::WindowSpec::default());
+        let req = ctx.windows().try_recv();
+        assert!(matches!(req, Some(crate::window::WindowRequest::Create(_))));
+    }
 
     #[test]
     fn ui_proxy_stashes_closure_until_drained() {
