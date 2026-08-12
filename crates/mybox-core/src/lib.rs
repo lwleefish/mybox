@@ -16,7 +16,7 @@ pub mod tray;
 pub mod window;
 
 pub use config::{config_dir, config_file_path, ConfigCenter};
-pub use context::ModuleContext;
+pub use context::{ModuleContext, UiThreadProxy};
 pub use error::{MyboxError, Result};
 pub use event::{Event, EventBus, EventFilter, EventPayload, FrameworkEvent, SubscriptionId};
 pub use hotkey::HotkeyManager;
