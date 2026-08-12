@@ -1,0 +1,28 @@
+# mybox workspace
+#
+# Cargo workspace for the mybox modular desktop toolbox.
+# See .planning/phases/01-framework/01-RESEARCH.md §3 for the crate layout rationale.
+
+[workspace]
+members = ["crates/mybox-core", "crates/mybox-app", "crates/modules/test"]
+resolver = "2"
+
+# Version-locked per RESEARCH §1 (verified 2026-08 against crates.io sources).
+# Do NOT bump any of these without re-verifying cross-compatibility.
+[workspace.dependencies]
+winit = "0.30.13"
+tiny-skia = "0.12.0"
+softbuffer = "0.4.8"
+global-hotkey = "0.8.0"
+tray-icon = "0.24.2"
+muda = "0.19.3"
+crossbeam-channel = "0.5.16"
+serde = "1"
+serde_json = "1"
+toml = "1.1.4"
+directories = "6.0.0"
+parking_lot = "0.12.5"
+anyhow = "1"
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
