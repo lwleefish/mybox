@@ -43,8 +43,8 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 01-02: 事件总线 + 窗口管理器实现
-- [ ] 01-03: 热键管理器 + 系统托盘 + 配置系统
+- [x] 01-02: 事件总线 + 窗口管理器实现
+- [x] 01-03: 热键管理器 + 系统托盘 + 配置系统
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -121,7 +121,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. 框架核心 | 1/4 | In Progress|  |
+| 1. 框架核心 | 3/4 | In Progress|  |
 | 2. 截图模块 | 0/3 | Not started | - |
 | 3. 命令面板 | 0/2 | Not started | - |
 | 4. 跨平台完善 | 0/2 | Not started | - |
