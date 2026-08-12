@@ -9,18 +9,18 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Framework
 
-- [ ] **FRMW-01**: 应用通过 Module trait 注册功能模块，模块在编译期通过 AppBuilder 注册
+- [x] **FRMW-01**: 应用通过 Module trait 注册功能模块，模块在编译期通过 AppBuilder 注册
 - [ ] **FRMW-02**: 模块间通过事件总线（pub/sub）通信，不直接依赖彼此 API
 - [ ] **FRMW-03**: WindowManager 支持创建 Overlay（全屏透明覆盖）、Floating（独立浮窗）、Panel（常规面板）三种窗口类型
-- [ ] **FRMW-04**: HotkeyManager 支持注册全局热键，热键触发时执行回调
-- [ ] **FRMW-05**: 框架在独立线程执行耗时操作，事件循环线程只处理 UI 事件和渲染
-- [ ] **FRMW-06**: macOS 上应用以 Accessory 模式运行（不显示在 Dock），覆盖窗口可获取键盘焦点
+- [x] **FRMW-04**: HotkeyManager 支持注册全局热键，热键触发时执行回调
+- [x] **FRMW-05**: 框架在独立线程执行耗时操作，事件循环线程只处理 UI 事件和渲染
+- [x] **FRMW-06**: macOS 上应用以 Accessory 模式运行（不显示在 Dock），覆盖窗口可获取键盘焦点
 
 ### Infrastructure
 
 - [ ] **INFRA-01**: ConfigCenter 支持分节 TOML 配置读写，按模块 ID 命名空间隔离
-- [ ] **INFRA-02**: 系统托盘驻留运行，右键菜单展示模块注册的菜单项和退出按钮
-- [ ] **INFRA-03**: 统一错误处理（anyhow + thiserror），关键操作有日志输出
+- [x] **INFRA-02**: 系统托盘驻留运行，右键菜单展示模块注册的菜单项和退出按钮
+- [x] **INFRA-03**: 统一错误处理（anyhow + thiserror），关键操作有日志输出
 - [ ] **INFRA-04**: 应用配置文件存储在用户配置目录（macOS: ~/Library/Application Support/mybox/）
 
 ### Capture
@@ -91,15 +91,15 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| FRMW-01 | Phase 1 | Pending |
+| FRMW-01 | Phase 1 | Complete |
 | FRMW-02 | Phase 1 | Pending |
 | FRMW-03 | Phase 1 | Pending |
-| FRMW-04 | Phase 1 | Pending |
-| FRMW-05 | Phase 1 | Pending |
-| FRMW-06 | Phase 1 | Pending |
+| FRMW-04 | Phase 1 | Complete |
+| FRMW-05 | Phase 1 | Complete |
+| FRMW-06 | Phase 1 | Complete |
 | INFRA-01 | Phase 1 | Pending |
-| INFRA-02 | Phase 1 | Pending |
-| INFRA-03 | Phase 1 | Pending |
+| INFRA-02 | Phase 1 | Complete |
+| INFRA-03 | Phase 1 | Complete |
 | INFRA-04 | Phase 1 | Pending |
 | CAP-01 | Phase 2 | Pending |
 | CAP-02 | Phase 2 | Pending |

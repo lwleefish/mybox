@@ -87,6 +87,14 @@ impl HotkeyManager {
     pub fn action_for_id(&self, id: u32) -> Option<String> {
         self.map.lock().unwrap().get(&id).cloned()
     }
+
+    /// Test-only: record an `id -> action` mapping without touching the OS, so
+    /// `action_for_id` / the App's hotkey dispatch can be exercised headlessly.
+    /// Real mappings come from `register_str` after `init`.
+    #[cfg(test)]
+    pub(crate) fn insert_mapping_for_test(&self, id: u32, action: &str) {
+        self.map.lock().unwrap().insert(id, action.to_string());
+    }
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 # Phase 1 Walking Skeleton — mybox 框架核心
 
-**Status:** Planning (execution pending)
+**Status:** Implemented (plan 01-04; automated suite green — manual display verification pending)
 **Mode:** MVP / Walking Skeleton
 **Phase:** 1-框架核心
 

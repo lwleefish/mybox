@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use crate::app::AppEvent;
 use crate::config::ConfigCenter;
 use crate::event::{Event, EventBus, EventFilter, SubscriptionId};
 use crate::hotkey::HotkeyManager;
@@ -23,9 +24,12 @@ pub struct ModuleContext {
 }
 
 impl ModuleContext {
-    /// Construct a context from the core services (core-internal).
-    #[allow(dead_code)] // called by the App (01-04)
-    pub(crate) fn new(
+    /// Construct a context from the core services.
+    ///
+    /// Public so feature-module crates can assemble a context in their own unit
+    /// tests (the 01-04 `AppBuilder` is the production caller). Every parameter
+    /// type is already public API.
+    pub fn new(
         bus: Arc<EventBus>,
         windows: Arc<WindowManagerHandle>,
         config: Arc<ConfigCenter>,
@@ -61,7 +65,10 @@ impl ModuleContext {
     }
 
     /// Enqueue window create/destroy requests (executed on the main thread).
-    pub fn windows(&self) -> &WindowManagerHandle {
+    ///
+    /// Returns the shared `Arc` so modules can clone the handle into 'static
+    /// event-handler closures (the 01-04 TestModule does exactly this).
+    pub fn windows(&self) -> &Arc<WindowManagerHandle> {
         &self.windows
     }
 
@@ -79,19 +86,20 @@ impl ModuleContext {
 }
 
 /// Forwards closures to the winit main thread (D-04 reconciliation with
-/// winit's main-thread-bound windows). Backed by `EventLoopProxy`.
+/// winit's main-thread-bound windows). Backed by `EventLoopProxy<AppEvent>`:
+/// [`run`](Self::run) forwards the closure as `AppEvent::Ui(f)`, which the App
+/// executes in `ApplicationHandler::user_event` on the main thread (01-04).
 ///
-/// Phase-1 note: `AppEvent` (01-04) does not exist yet, so the proxy is
-/// temporarily typed `EventLoopProxy<()>` and closures are stashed in
-/// `pending`. 01-04 switches the type to `EventLoopProxy<AppEvent>` and drains
-/// `pending` inside `user_event`/`resumed` on the main thread.
+/// Cloneable (shares the proxy behind an `Arc`) so both the App and the
+/// `ModuleContext` handed to modules reference the same forwarder.
+#[derive(Clone)]
 pub struct UiThreadProxy {
-    inner: parking_lot::Mutex<UiThreadProxyInner>,
+    inner: Arc<parking_lot::Mutex<UiThreadProxyInner>>,
 }
 
 #[derive(Default)]
 struct UiThreadProxyInner {
-    proxy: Option<winit::event_loop::EventLoopProxy<()>>,
+    proxy: Option<winit::event_loop::EventLoopProxy<AppEvent>>,
     pending: Vec<Box<dyn FnOnce() + Send>>,
 }
 
@@ -99,28 +107,38 @@ impl UiThreadProxy {
     /// Create a proxy with no backing event loop yet.
     pub fn new() -> Self {
         Self {
-            inner: parking_lot::Mutex::new(UiThreadProxyInner::default()),
+            inner: Arc::new(parking_lot::Mutex::new(UiThreadProxyInner::default())),
         }
     }
 
-    /// Attach the winit `EventLoopProxy` (called by App in 01-04 once the loop
-    /// exists).
-    pub fn set_proxy(&self, proxy: winit::event_loop::EventLoopProxy<()>) {
-        self.inner.lock().proxy = Some(proxy);
+    /// Attach the winit `EventLoopProxy` (called by `App::run` once the loop
+    /// exists). Any closures enqueued before the loop existed (e.g. during
+    /// module `init`) are flushed through the loop at this point.
+    pub fn set_proxy(&self, proxy: winit::event_loop::EventLoopProxy<AppEvent>) {
+        let mut inner = self.inner.lock();
+        let pending = std::mem::take(&mut inner.pending);
+        for f in pending {
+            let _ = proxy.send_event(AppEvent::Ui(f));
+        }
+        inner.proxy = Some(proxy);
     }
 
-    /// Run `f` on the main thread.
+    /// Run `f` on the winit main thread.
     ///
-    /// Phase 1 placeholder: `EventLoopProxy<()>` cannot carry a closure, so the
-    /// closure is stashed in `pending`. 01-04 swaps the proxy type to
-    /// `EventLoopProxy<AppEvent>` (with an `AppEvent::Ui(Box<dyn FnOnce>)`
-    /// variant) and this method forwards via `send_event`.
+    /// Forwarded as `AppEvent::Ui(f)` through the loop proxy. If the loop does
+    /// not exist yet (module `init` runs before `run()`), the closure is stashed
+    /// until `set_proxy` flushes it.
     pub fn run(&self, f: Box<dyn FnOnce() + Send>) {
-        self.inner.lock().pending.push(f);
+        let mut inner = self.inner.lock();
+        if let Some(proxy) = &inner.proxy {
+            let _ = proxy.send_event(AppEvent::Ui(f));
+        } else {
+            inner.pending.push(f);
+        }
     }
 
-    /// Take any stashed closures so the main thread can execute them (01-04).
-    #[allow(dead_code)] // consumed by 01-04 when the proxy becomes AppEvent-typed
+    /// Take any stashed closures so the main thread can execute them (tests).
+    #[cfg(test)]
     pub(crate) fn drain_pending(&self) -> Vec<Box<dyn FnOnce() + Send>> {
         std::mem::take(&mut self.inner.lock().pending)
     }
