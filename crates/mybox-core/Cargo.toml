@@ -19,3 +19,7 @@ parking_lot = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
+
+# Note: the #[ignore] display/integration tests (tests/integration.rs) and the
+# display_checks bin (src/bin/display_checks.rs) use winit + tiny-skia, which
+# are already regular [dependencies] above — no [dev-dependencies] needed.
