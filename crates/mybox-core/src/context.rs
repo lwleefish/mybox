@@ -1,9 +1,9 @@
 //! ModuleContext — the only facade modules see of the core (FRMW-02).
 //!
-//! Holds `Arc`-backed references to core services. Accessors
-//! `emit`/`on`/`ui`/`windows` land in plan 01-02; `config`/`hotkeys` in
-//! plan 01-03. This file provides the fields, the `pub(crate)` constructor,
-//! and the plan-01-02 accessors.
+//! Holds `Arc`-backed references to core services, exposed through accessors:
+//! `emit`/`on`/`ui`/`windows` landed in plan 01-02; `config`/`hotkeys` land in
+//! plan 01-03. This file provides the fields, the `pub(crate)` constructor, and
+//! the accessors.
 
 use std::sync::Arc;
 
@@ -14,10 +14,6 @@ use crate::window::WindowManagerHandle;
 
 /// The object handed to `Module::init`. Modules interact with the framework
 /// exclusively through this context.
-///
-/// `#[allow(dead_code)]`: `config`/`hotkeys` are consumed by 01-03's accessors;
-/// `new` (below) is called by the 01-04 App.
-#[allow(dead_code)]
 pub struct ModuleContext {
     pub(crate) bus: Arc<EventBus>,
     pub(crate) windows: Arc<WindowManagerHandle>,
@@ -67,6 +63,18 @@ impl ModuleContext {
     /// Enqueue window create/destroy requests (executed on the main thread).
     pub fn windows(&self) -> &WindowManagerHandle {
         &self.windows
+    }
+
+    /// Access the shared configuration center (INFRA-01/INFRA-04). Modules read
+    /// and mutate their own `[module_id]` section here.
+    pub fn config(&self) -> &Arc<ConfigCenter> {
+        &self.config
+    }
+
+    /// Access the shared global hotkey manager (FRMW-04). Registration happens
+    /// in the 01-04 App via `init()` + `register_str()`.
+    pub fn hotkeys(&self) -> &Arc<HotkeyManager> {
+        &self.hotkeys
     }
 }
 
@@ -185,6 +193,29 @@ mod tests {
         ctx.windows().create(crate::window::WindowSpec::default());
         let req = ctx.windows().try_recv();
         assert!(matches!(req, Some(crate::window::WindowRequest::Create(_))));
+    }
+
+    #[test]
+    fn config_and_hotkeys_accessors_return_shared_services() {
+        let config = Arc::new(ConfigCenter::default());
+        let hotkeys = Arc::new(HotkeyManager::new());
+        let ctx = ModuleContext::new(
+            Arc::new(EventBus::new()),
+            Arc::new(WindowManagerHandle::new()),
+            Arc::clone(&config),
+            Arc::clone(&hotkeys),
+            UiThreadProxy::new(),
+        );
+        // The accessors return the exact Arc instances the context was built
+        // with — modules see the same ConfigCenter/HotkeyManager as the App.
+        assert!(
+            Arc::ptr_eq(ctx.config(), &config),
+            "config() must return the shared ConfigCenter"
+        );
+        assert!(
+            Arc::ptr_eq(ctx.hotkeys(), &hotkeys),
+            "hotkeys() must return the shared HotkeyManager"
+        );
     }
 
     #[test]

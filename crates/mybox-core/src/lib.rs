@@ -22,7 +22,7 @@ pub use event::{Event, EventBus, EventFilter, EventPayload, FrameworkEvent, Subs
 pub use hotkey::HotkeyManager;
 pub use module::{Module, ModuleRegistry};
 pub use renderer::{Renderer, TinySkiaSoftbufferRenderer};
-pub use tray::TrayManager;
+pub use tray::{build_menu, generate_icon, TrayManager};
 pub use window::{
     window_attributes, WindowId, WindowKind, WindowManager, WindowManagerHandle, WindowRequest,
     WindowSpec, WindowState,
