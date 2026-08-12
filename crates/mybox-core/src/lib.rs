@@ -23,4 +23,7 @@ pub use hotkey::HotkeyManager;
 pub use module::{Module, ModuleRegistry};
 pub use renderer::Renderer;
 pub use tray::TrayManager;
-pub use window::{WindowId, WindowKind, WindowManagerHandle, WindowSpec, WindowState};
+pub use window::{
+    window_attributes, WindowId, WindowKind, WindowManager, WindowManagerHandle, WindowRequest,
+    WindowSpec, WindowState,
+};
