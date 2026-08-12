@@ -16,11 +16,14 @@ pub mod tray;
 pub mod window;
 
 pub use config::{config_dir, config_file_path, ConfigCenter};
-pub use context::ModuleContext;
+pub use context::{ModuleContext, UiThreadProxy};
 pub use error::{MyboxError, Result};
 pub use event::{Event, EventBus, EventFilter, EventPayload, FrameworkEvent, SubscriptionId};
 pub use hotkey::HotkeyManager;
 pub use module::{Module, ModuleRegistry};
-pub use renderer::Renderer;
+pub use renderer::{Renderer, TinySkiaSoftbufferRenderer};
 pub use tray::TrayManager;
-pub use window::{WindowId, WindowKind, WindowManagerHandle, WindowSpec, WindowState};
+pub use window::{
+    window_attributes, WindowId, WindowKind, WindowManager, WindowManagerHandle, WindowRequest,
+    WindowSpec, WindowState,
+};

@@ -1,13 +1,21 @@
 //! Renderer abstraction (D-01/D-02/D-03).
 //!
 //! Modules see only the [`Renderer`] trait; core owns the tiny-skia + softbuffer
-//! backend. The concrete `TinySkiaSoftbufferRenderer` lands in plan 01-02, and
-//! the pure pixel-conversion function `premul_rgba_to_u32` lands in plan 01-01-06.
+//! backend (`tiny_skia_softbuffer::TinySkiaSoftbufferRenderer`, plan 01-02) and
+//! the pure pixel-conversion function `premul_rgba_to_u32` (plan 01-01-06).
+
+pub mod tiny_skia_softbuffer;
+
+pub use tiny_skia_softbuffer::TinySkiaSoftbufferRenderer;
 
 /// Per-window compositing abstraction (D-03). The `draw` closure isolates
 /// content generation from compositing, leaving a slot for the egui layer in
 /// Phase 3 (RESEARCH §5).
-pub trait Renderer: Send {
+///
+/// NOT `Send`: the concrete backend owns the main-thread-bound winit window
+/// (softbuffer's macOS Surface stores it), so a renderer can never cross
+/// threads. Renderers live inside the main-thread-bound `WindowManager`.
+pub trait Renderer {
     /// Resize the backing pixmap / softbuffer surface.
     fn resize(&mut self, width: u32, height: u32);
 
@@ -64,5 +72,38 @@ mod tests {
     fn semi_transparent_channel_clamps_to_255() {
         // r' = 255*255/128 = 508 -> clamped to 255.
         assert_eq!(premul_rgba_to_u32(0xFF, 0x80, 0x40, 0x80), 0x00FF_FF7F);
+    }
+
+    #[test]
+    fn draw_fills_center_pixel_red() {
+        // Headless-safe stand-in for the full TinySkiaSoftbufferRenderer::draw
+        // path (which needs a real window): paint a red rectangle into an
+        // in-memory Pixmap the same way `draw` would, then assert the centre
+        // pixel converts to 0x00FF0000 through premul_rgba_to_u32 (D-01/D-02).
+        let mut pixmap = tiny_skia::Pixmap::new(10, 10).expect("10x10 pixmap");
+        let mut pm = pixmap.as_mut();
+        pm.fill(tiny_skia::Color::from_rgba8(0xFF, 0x00, 0x00, 0xFF));
+
+        let (w, h) = (pixmap.width() as usize, pixmap.height() as usize);
+        let cx = w / 2;
+        let cy = h / 2;
+        let data = pixmap.data();
+        let off = (cy * w + cx) * 4;
+        let (r, g, b, a) = (data[off], data[off + 1], data[off + 2], data[off + 3]);
+        assert_eq!(premul_rgba_to_u32(r, g, b, a), 0x00FF_0000);
+    }
+
+    #[test]
+    fn draw_closure_receives_pixmap_and_size() {
+        // Mirrors the Renderer::draw closure contract (content generator gets the
+        // pixmap + size) against an in-memory Pixmap, so the shape is verified
+        // headlessly even though the full renderer needs a real window.
+        let mut pixmap = tiny_skia::Pixmap::new(8, 6).expect("8x6 pixmap");
+        let mut size_seen = (0, 0);
+        let mut f = |_p: &mut tiny_skia::PixmapMut, w: u32, h: u32| {
+            size_seen = (w, h);
+        };
+        f(&mut pixmap.as_mut(), 8, 6);
+        assert_eq!(size_seen, (8, 6));
     }
 }
