@@ -21,7 +21,7 @@ pub use error::{MyboxError, Result};
 pub use event::{Event, EventBus, EventFilter, EventPayload, FrameworkEvent, SubscriptionId};
 pub use hotkey::HotkeyManager;
 pub use module::{Module, ModuleRegistry};
-pub use renderer::Renderer;
+pub use renderer::{Renderer, TinySkiaSoftbufferRenderer};
 pub use tray::TrayManager;
 pub use window::{
     window_attributes, WindowId, WindowKind, WindowManager, WindowManagerHandle, WindowRequest,

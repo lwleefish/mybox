@@ -109,12 +109,12 @@ pub struct WindowState {
     pub id: WindowId,
     pub kind: WindowKind,
     pub winit_id: winit::window::WindowId,
-    /// The OS window. `Option` because a state may be registered before/without
-    /// the winit window being attached (the D-07 enqueue → main-thread-execute
-    /// flow), and because winit `Window` cannot be constructed headlessly (only
-    /// via `ActiveEventLoop::create_window`). The 01-04 App passes `Some(..)`
-    /// after creating the window.
-    pub window: Option<winit::window::Window>,
+    /// The OS window, shared via `Arc` with the renderer (softbuffer's Surface
+    /// holds the window, so it must be shared rather than owned twice). `None`
+    /// when no window is attached yet (the D-07 enqueue → main-thread-execute
+    /// flow) — winit windows cannot be constructed headlessly. The 01-04 App
+    /// passes `Some(Arc::new(window))` after `ActiveEventLoop::create_window`.
+    pub window: Option<Arc<winit::window::Window>>,
     pub renderer: Box<dyn Renderer>,
     pub spec: WindowSpec,
 }
@@ -126,7 +126,7 @@ impl WindowState {
         id: WindowId,
         kind: WindowKind,
         winit_id: winit::window::WindowId,
-        window: Option<winit::window::Window>,
+        window: Option<Arc<winit::window::Window>>,
         renderer: Box<dyn Renderer>,
         spec: WindowSpec,
     ) -> Self {
@@ -215,9 +215,10 @@ pub struct WindowManager {
     next_id: WindowId,
     /// Injectable window→renderer mapper used by Phase-2 `batch_create`;
     /// stored here so it is available to future plans (kept dead-code-annotated
-    /// until then).
+    /// until then). Takes the `Arc`-shared window (the renderer owns it).
     #[allow(dead_code)]
-    renderer_factory: Box<dyn Fn(&winit::window::Window) -> Box<dyn Renderer> + Send + Sync>,
+    renderer_factory:
+        Box<dyn Fn(Arc<winit::window::Window>) -> Box<dyn Renderer> + Send + Sync>,
 }
 
 impl WindowManager {
@@ -225,7 +226,9 @@ impl WindowManager {
     /// window to its renderer (used by batch creation in Phase 2; mockable in
     /// tests).
     pub fn new(
-        renderer_factory: Box<dyn Fn(&winit::window::Window) -> Box<dyn Renderer> + Send + Sync>,
+        renderer_factory: Box<
+            dyn Fn(Arc<winit::window::Window>) -> Box<dyn Renderer> + Send + Sync,
+        >,
     ) -> Self {
         Self {
             states: HashMap::new(),
@@ -247,7 +250,7 @@ impl WindowManager {
         id: WindowId,
         kind: WindowKind,
         winit_id: winit::window::WindowId,
-        window: Option<winit::window::Window>,
+        window: Option<Arc<winit::window::Window>>,
         renderer: Box<dyn Renderer>,
         spec: WindowSpec,
     ) {
@@ -353,8 +356,9 @@ mod window_manager {
         }
     }
 
-    fn mock_factory() -> Box<dyn Fn(&winit::window::Window) -> Box<dyn Renderer> + Send + Sync> {
-        Box::new(|_w: &winit::window::Window| Box::new(MockRenderer) as Box<dyn Renderer>)
+    fn mock_factory(
+    ) -> Box<dyn Fn(Arc<winit::window::Window>) -> Box<dyn Renderer> + Send + Sync> {
+        Box::new(|_w: Arc<winit::window::Window>| Box::new(MockRenderer) as Box<dyn Renderer>)
     }
 
     fn register_dummy(wm: &mut WindowManager, id: WindowId, winit_id: winit::window::WindowId) {
