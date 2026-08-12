@@ -589,6 +589,24 @@ mod tests {
     }
 
     #[test]
+    fn handle_create_lands_in_app_window_rx() {
+        // W2 plumbing: a module enqueues a WindowRequest through the shared
+        // handle (any thread); the App drains it from its own window_rx — the
+        // same channel, created once in build() (from_sender path).
+        let app = sample_app();
+        let spec = WindowSpec {
+            title: "plumbing".to_string(),
+            ..Default::default()
+        };
+        app.window_handle.create(spec);
+        match app.window_rx.try_recv() {
+            Ok(WindowRequest::Create(s)) => assert_eq!(s.title, "plumbing"),
+            Ok(WindowRequest::Destroy(_)) => panic!("expected Create, got Destroy"),
+            Err(_) => panic!("enqueued Create request never reached the App's window_rx"),
+        }
+    }
+
+    #[test]
     fn on_menu_emits_menu_triggered_with_menu_id() {
         let app = sample_app();
         let seen: Arc<parking_lot::Mutex<Vec<Event>>> =
