@@ -5,6 +5,7 @@
 //! abstraction, and the unified error type. Feature modules depend only on the
 //! public API re-exported here (FRMW-02).
 
+pub mod app;
 pub mod config;
 pub mod context;
 pub mod error;
@@ -15,6 +16,7 @@ pub mod renderer;
 pub mod tray;
 pub mod window;
 
+pub use app::{App, AppBuilder, AppEvent};
 pub use config::{config_dir, config_file_path, ConfigCenter};
 pub use context::{ModuleContext, UiThreadProxy};
 pub use error::{MyboxError, Result};

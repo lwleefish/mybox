@@ -157,7 +157,9 @@ pub enum WindowRequest {
 /// would not wake a waiting event loop).
 pub struct WindowManagerHandle {
     tx: crossbeam_channel::Sender<WindowRequest>,
-    rx: crossbeam_channel::Receiver<WindowRequest>,
+    /// `None` when the caller owns the receiver (the App drains via its own
+    /// `window_rx`, W2); `Some` on the standalone `new()` path.
+    rx: Option<crossbeam_channel::Receiver<WindowRequest>>,
     wake: parking_lot::Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>,
 }
 
@@ -167,7 +169,19 @@ impl WindowManagerHandle {
         let (tx, rx) = crossbeam_channel::unbounded();
         Self {
             tx,
-            rx,
+            rx: Some(rx),
+            wake: parking_lot::Mutex::new(None),
+        }
+    }
+
+    /// Build a handle whose sender was created externally so the caller (the
+    /// App in `AppBuilder::build`) can own the receiver half for main-thread
+    /// draining (`App::window_rx`, W2). The standalone `try_recv` is unavailable
+    /// on this path — the caller drains instead.
+    pub fn from_sender(tx: crossbeam_channel::Sender<WindowRequest>) -> Self {
+        Self {
+            tx,
+            rx: None,
             wake: parking_lot::Mutex::new(None),
         }
     }
@@ -190,9 +204,10 @@ impl WindowManagerHandle {
         *self.wake.lock() = Some(wake);
     }
 
-    /// Drain one queued request, if any. Called by the App on the main thread.
+    /// Drain one queued request, if any. Available on the standalone `new()`
+    /// path; the App (which owns the receiver) drains through `App::window_rx`.
     pub fn try_recv(&self) -> Option<WindowRequest> {
-        self.rx.try_recv().ok()
+        self.rx.as_ref().and_then(|rx| rx.try_recv().ok())
     }
 
     fn trigger_wake(&self) {
