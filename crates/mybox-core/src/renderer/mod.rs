@@ -18,3 +18,51 @@ pub trait Renderer: Send {
     /// Present the composited pixmap to the window (softbuffer).
     fn present(&mut self) -> crate::error::Result<()>;
 }
+
+/// Convert premultiplied RGBA bytes to softbuffer's `0x00RRGGBB` pixel format.
+///
+/// Opaque pixels (`alpha == 255`) are packed directly. Semi-transparent pixels
+/// are un-premultiplied first (`channel * 255 / alpha`) so the color survives;
+/// softbuffer drops alpha on macOS anyway (`CGImageAlphaInfo::NoneSkipFirst`,
+/// RESEARCH §0.5), so the result is the straight RGB value. Fully transparent
+/// pixels collapse to black.
+pub fn premul_rgba_to_u32(r: u8, g: u8, b: u8, a: u8) -> u32 {
+    if a == 0 {
+        return 0x0000_0000;
+    }
+    if a == 255 {
+        return (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
+    }
+    let r = (u32::from(r) * 255) / u32::from(a);
+    let g = (u32::from(g) * 255) / u32::from(a);
+    let b = (u32::from(b) * 255) / u32::from(a);
+    (r.min(255) << 16) | (g.min(255) << 8) | b.min(255)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opaque_pixel_packs_directly() {
+        assert_eq!(premul_rgba_to_u32(0xFF, 0x80, 0x40, 0xFF), 0x00FF_8040);
+    }
+
+    #[test]
+    fn fully_transparent_pixel_is_zero() {
+        assert_eq!(premul_rgba_to_u32(0xFF, 0x80, 0x40, 0x00), 0x0000_0000);
+    }
+
+    #[test]
+    fn semi_transparent_pixel_is_unpremultiplied() {
+        // premul (0x80,0x40,0x20) at alpha=0x80/255:
+        //   r' = 128*255/128 = 255, g' = 64*255/128 = 127, b' = 32*255/128 = 63
+        assert_eq!(premul_rgba_to_u32(0x80, 0x40, 0x20, 0x80), 0x00FF_7F3F);
+    }
+
+    #[test]
+    fn semi_transparent_channel_clamps_to_255() {
+        // r' = 255*255/128 = 508 -> clamped to 255.
+        assert_eq!(premul_rgba_to_u32(0xFF, 0x80, 0x40, 0x80), 0x00FF_FF7F);
+    }
+}
