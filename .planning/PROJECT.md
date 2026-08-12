@@ -12,11 +12,10 @@ mybox 是一个纯 Rust 原生的跨平台（macOS + Windows）桌面工具箱�
 
 ### Validated
 
-(None yet - ship to validate)
+- [x] 模块化框架：Module trait、事件总线、窗口管理、热键系统、配置中心、系统托盘 (Validated in Phase 1: framework - 4 plans, 77 tests passing, Walking Skeleton proven)
 
 ### Active
 
-- [ ] 模块化框架：Module trait、事件总线、窗口管理、热键系统、配置中心、系统托盘
 - [ ] 截图模块：屏幕捕获、区域选择、标注工具、Pin 浮窗、剪贴板复制
 - [ ] 命令面板：全局快捷键唤出，作为所有模块的统一交互入口
 - [ ] 跨平台支持：macOS 和 Windows
@@ -75,5 +74,9 @@ This document evolves at phase transitions and milestone boundaries.
 3. Audit Out of Scope - reasons still valid?
 4. Update Context with current state
 
+## Current State
+
+Phase 1 complete - 模块化框架基础设施已搭建：Module trait + AppBuilder、EventBus（工作线程分发）、WindowManager（Overlay/Floating/Panel）、HotkeyManager、ConfigCenter、TrayManager、App 事件循环（macOS Accessory 模式）。Walking Skeleton 已验证：热键 -> 事件总线 -> TestModule -> 窗口创建端到端链路。下一步：Phase 2 截图模块。
+
 ---
-*Last updated: 2026-08-11 after initialization*
+*Last updated: 2026-08-12 after Phase 1 completion*
