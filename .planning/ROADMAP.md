@@ -13,7 +13,7 @@
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: 框架核心** - 搭建模块化框架基础设施
+- [x] **Phase 1: 框架核心** - 搭建模块化框架基础设施 (completed 2026-08-12)
 - [ ] **Phase 2: 截图模块** - 完整截图功能验证框架
 - [ ] **Phase 3: 命令面板** - 统一交互入口
 - [ ] **Phase 4: 跨平台完善** - Windows 适配与打磨
@@ -48,7 +48,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 01-04: 事件循环集成 + macOS 平台适配 + 测试模块验证
+- [x] 01-04: 事件循环集成 + macOS 平台适配 + 测试模块验证
 
 ### Phase 2: 截图模块
 
@@ -121,7 +121,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. 框架核心 | 3/4 | In Progress|  |
+| 1. 框架核心 | 4/4 | Complete   | 2026-08-12 |
 | 2. 截图模块 | 0/3 | Not started | - |
 | 3. 命令面板 | 0/2 | Not started | - |
 | 4. 跨平台完善 | 0/2 | Not started | - |

@@ -4,13 +4,13 @@ milestone: v1.0
 milestone_name: milestone
 status: executing
 stopped_at: Phase 1 context gathered
-last_updated: "2026-08-12T00:50:20.906Z"
+last_updated: "2026-08-12T08:53:01.383Z"
 last_activity: 2026-08-12 -- Phase 01 execution started
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 4
-  completed_plans: 0
+  completed_plans: 3
   percent: 0
 ---
 
@@ -21,11 +21,11 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-11)
 
 **Core value:** 一个统一入口、可按自己想法无限扩展的桌面工具箱
-**Current focus:** Phase 01 — 框架核心
+**Current focus:** Phase 01 — framework
 
 ## Current Position
 
-Phase: 01 (框架核心) — EXECUTING
+Phase: 01 (framework) — EXECUTING
 Plan: 1 of 4
 Status: Executing Phase 01
 Last activity: 2026-08-12 -- Phase 01 execution started
