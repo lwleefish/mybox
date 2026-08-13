@@ -31,19 +31,30 @@ use capture::{capture_all_monitors, CaptureFn};
 use permission::{check_access, AccessChecker};
 use session::CaptureSession;
 
+/// Injectable access requester (triggers the macOS system prompt).
+type AccessRequester = Arc<dyn Fn() -> bool + Send + Sync>;
+/// Injectable System Settings opener (deep-link guidance). `Arc` so a counting
+/// closure can be swapped in for tests.
+type SettingsOpener = Arc<dyn Fn() + Send + Sync>;
+
 /// Screenshot capture module: hotkey/menu → preflight → worker-thread capture
 /// → `SessionState`.
 pub struct CaptureModule {
     capture: CaptureFn,
     access: AccessChecker,
+    request: AccessRequester,
+    open: SettingsOpener,
 }
 
 impl CaptureModule {
-    /// Production defaults: real xcap capture + real macOS access check.
+    /// Production defaults: real xcap capture + real macOS access check +
+    /// real system prompt / Settings deep link.
     pub fn new() -> Self {
         Self {
             capture: Arc::new(capture_all_monitors),
             access: permission::real_access_checker,
+            request: Arc::new(permission::request_access),
+            open: Arc::new(permission::open_system_settings),
         }
     }
 }
@@ -89,6 +100,8 @@ impl Module for CaptureModule {
         let hotkey_windows = ctx.windows().clone();
         let hotkey_capture = self.capture.clone();
         let hotkey_access = self.access;
+        let hotkey_request = self.request.clone();
+        let hotkey_open = self.open.clone();
         ctx.on(
             EventFilter::kind("core", "hotkey.triggered"),
             Box::new(move |e| {
@@ -103,6 +116,8 @@ impl Module for CaptureModule {
                             hotkey_windows.clone(),
                             hotkey_capture.clone(),
                             hotkey_access,
+                            hotkey_request.clone(),
+                            hotkey_open.clone(),
                         );
                     }
                 }
@@ -115,6 +130,8 @@ impl Module for CaptureModule {
         let menu_windows = ctx.windows().clone();
         let menu_capture = self.capture.clone();
         let menu_access = self.access;
+        let menu_request = self.request.clone();
+        let menu_open = self.open.clone();
         ctx.on(
             EventFilter::kind("core", "menu.triggered"),
             Box::new(move |e| {
@@ -127,6 +144,8 @@ impl Module for CaptureModule {
                             menu_windows.clone(),
                             menu_capture.clone(),
                             menu_access,
+                            menu_request.clone(),
+                            menu_open.clone(),
                         );
                     }
                 }
@@ -168,20 +187,32 @@ impl Module for CaptureModule {
 /// Preflight permission, then capture on a named worker thread. Results are
 /// forwarded to the main thread via `UiThreadProxy` and stored in the session
 /// (RESEARCH Pattern 4); on success the per-monitor overlay windows are created
-/// (CAP-02). `capture`/`access` are injected so headless tests can substitute
-/// fakes — this is the only injection point for tests.
+/// (CAP-02). `capture`/`access`/`request`/`open` are injected so headless tests
+/// can substitute fakes — this is the only injection point for tests.
+///
+/// Permission flow (macOS, CAP-08): denied → request the system prompt → recheck
+/// → still denied → open System Settings + log guidance + abort (never silently
+/// capture a black image — T-2-02).
 fn start_capture(
     session: &Arc<CaptureSession>,
     ui: &UiThreadProxy,
     windows: Arc<WindowManagerHandle>,
     capture: CaptureFn,
     access: AccessChecker,
+    request: AccessRequester,
+    open: SettingsOpener,
 ) {
     if !check_access(access) {
-        log::warn!(
-            "capture aborted: macOS Screen Recording permission not granted (CAP-08 preflight)"
-        );
-        return;
+        log::warn!("capture: macOS Screen Recording permission denied — requesting (CAP-08)");
+        request();
+        if !check_access(access) {
+            open();
+            log::info!(
+                "capture: 请到 系统设置 → 隐私与安全性 → 屏幕录制 授权 mybox；\
+                 授权后可能需要重启 mybox（A1）"
+            );
+            return;
+        }
     }
     let session = Arc::clone(session);
     let ui = ui.clone();
@@ -291,7 +322,7 @@ mod tests {
             Ok(vec![sample_shot()])
         });
 
-        start_capture(&session, &ui, windows, fake, || true);
+        start_capture(&session, &ui, windows, fake, || true, Arc::new(|| true), Arc::new(|| {}));
 
         assert!(
             wait_until(|| count.load(Ordering::SeqCst) > 0),
@@ -300,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn start_capture_aborts_when_access_denied() {
+    fn start_capture_denied_requests_then_opens_settings_and_aborts() {
         let session = Arc::new(CaptureSession::new());
         let ui = UiThreadProxy::new();
         let windows = Arc::new(WindowManagerHandle::new());
@@ -312,13 +343,41 @@ mod tests {
             Ok(vec![sample_shot()])
         });
 
-        start_capture(&session, &ui, windows, fake, || false);
+        let requested = Arc::new(AtomicUsize::new(0));
+        let r = requested.clone();
+        let opened = Arc::new(AtomicUsize::new(0));
+        let o = opened.clone();
+
+        start_capture(
+            &session,
+            &ui,
+            windows,
+            fake,
+            || false, // access: always denied
+            Arc::new(move || {
+                r.fetch_add(1, Ordering::SeqCst);
+                false
+            }),
+            Arc::new(move || {
+                o.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
 
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(
             count.load(Ordering::SeqCst),
             0,
             "denied access must not spawn the capture thread"
+        );
+        assert_eq!(
+            requested.load(Ordering::SeqCst),
+            1,
+            "denied path must trigger the system prompt once"
+        );
+        assert_eq!(
+            opened.load(Ordering::SeqCst),
+            1,
+            "still-denied path must open System Settings once"
         );
     }
 
@@ -336,6 +395,8 @@ mod tests {
         let module = CaptureModule {
             capture: fake,
             access: || true,
+            request: Arc::new(|| true),
+            open: Arc::new(|| {}),
         };
         module.init(&ctx).expect("init registers handlers");
 
