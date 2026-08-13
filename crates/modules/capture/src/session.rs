@@ -222,6 +222,19 @@ impl CaptureSession {
     pub fn active_handle(&self) -> Option<Handle> {
         self.state.lock().unwrap().active_handle
     }
+
+    /// Cancel the whole capture (ESC, D-04): reset to `Idle`, clear the
+    /// selection, and hand back the overlay window ids to destroy. Idempotent —
+    /// `overlay_ids` is drained, so a repeated ESC destroys nothing (T-2-06).
+    pub fn cancel(&self) -> Vec<WindowId> {
+        let mut state = self.state.lock().unwrap();
+        state.phase = Phase::Idle;
+        state.selection = None;
+        state.drag_anchor = None;
+        state.active_handle = None;
+        state.last_cursor = None;
+        std::mem::take(&mut state.overlay_ids)
+    }
 }
 
 impl Default for CaptureSession {
@@ -308,5 +321,31 @@ mod tests {
         session.on_mouse_move(0, tiny_skia::Point::from_xy(150.0, 150.0));
         let (_, sel) = session.selection().unwrap();
         assert_eq!(sel, SelectionRect { x0: 10.0, y0: 10.0, x1: 150.0, y1: 150.0 });
+    }
+
+    #[test]
+    fn cancel_resets_and_returns_overlay_ids_once() {
+        let session = CaptureSession::new();
+        {
+            let state_arc = session.state();
+            let mut state = state_arc.lock().unwrap();
+            state.pending_overlays = 2;
+        }
+        session.window_created(7);
+        session.window_created(8);
+
+        // Build a Selected selection first (CAP-05: cancel clears a live selection).
+        session.on_mouse_down(0, tiny_skia::Point::from_xy(10.0, 10.0));
+        session.on_mouse_move(0, tiny_skia::Point::from_xy(50.0, 50.0));
+        session.on_mouse_up();
+        assert_eq!(session.phase(), Phase::Selected);
+
+        let ids = session.cancel();
+        assert_eq!(ids, vec![7, 8], "cancel returns the overlay ids to destroy");
+        assert_eq!(session.phase(), Phase::Idle);
+        assert_eq!(session.selection(), None);
+
+        // Idempotent: overlay_ids is drained, so a second cancel returns nothing.
+        assert_eq!(session.cancel(), Vec::<WindowId>::new());
     }
 }

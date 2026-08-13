@@ -11,6 +11,7 @@ pub mod overlay;
 pub mod permission;
 pub mod selection;
 pub mod session;
+pub mod text;
 
 use std::sync::Arc;
 

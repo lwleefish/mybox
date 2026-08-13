@@ -8,16 +8,23 @@
 
 use std::sync::Arc;
 
-use mybox_core::log;
-use mybox_core::tiny_skia::{IntSize, Paint, Pixmap, PixmapMut, PixmapPaint, Rect, Transform};
+use mybox_core::tiny_skia::{
+    IntSize, Paint, PathBuilder, Pixmap, PixmapMut, PixmapPaint, Point, Rect, Stroke, Transform,
+};
 use mybox_core::window::{WindowKind, WindowManagerHandle, WindowSpec};
-use mybox_core::winit;
+use mybox_core::winit::event::{ElementState, MouseButton, WindowEvent};
+use mybox_core::winit::keyboard::{Key, NamedKey};
 
+use crate::selection;
 use crate::session::{CaptureSession, SelectionRect};
+use crate::text;
 
 /// Dimming-mask opacity (CAP-02: semi-transparent black over the un-selected
 /// area).
 pub const MASK_ALPHA: u8 = 0x80;
+
+/// On-screen size of the 8 resize handles (D-02: 6px white squares).
+const HANDLE_SIZE: f32 = 6.0;
 
 /// Convert straight-alpha RGBA8 bytes to premultiplied RGBA8 (Pitfall 2).
 ///
@@ -109,6 +116,12 @@ fn draw_overlay(
         .filter(|(mi, _)| *mi == monitor_index)
         .map(|(_, rect)| *rect);
     composite_frame(pm, w, h, shot, selection.as_ref());
+
+    // Selection border + handles + WxH only on the monitor that owns it.
+    if let Some(sel) = selection {
+        let font = text::load_font();
+        draw_selection_overlay(pm, &font, &sel);
+    }
 }
 
 /// Composite one frame: blit the capture, then dim everything outside the
@@ -170,14 +183,126 @@ fn draw_mask_outside(pm: &mut PixmapMut, w: f32, h: f32, sel: &SelectionRect, ma
     fill_rect_safe(pm, sel.x1, sel.y0, w - sel.x1, sel.y1 - sel.y0, mask); // right
 }
 
-/// Per-window input routing. Drag select / handles / ESC land in Task 3.
+/// Per-window input routing (CAP-03/05, D-02/D-04): drag-select, handle resize,
+/// and ESC cancel. Runs on the main thread from the core's `window_event` route.
 fn handle_overlay_event(
-    _session: &CaptureSession,
-    _windows: &WindowManagerHandle,
-    _monitor_index: usize,
-    _event: &winit::event::WindowEvent,
+    session: &CaptureSession,
+    windows: &WindowManagerHandle,
+    monitor_index: usize,
+    event: &WindowEvent,
 ) {
-    log::trace!("overlay event (interaction lands in Task 3)");
+    match event {
+        WindowEvent::CursorMoved { position, .. } => {
+            let pos = Point::from_xy(position.x as f32, position.y as f32);
+            session.on_mouse_move(monitor_index, pos);
+            redraw_all_overlays(session, windows);
+        }
+        WindowEvent::MouseInput {
+            state: ElementState::Pressed,
+            button: MouseButton::Left,
+            ..
+        } => {
+            if let Some(pos) = session.last_cursor() {
+                // If the cursor is over a handle of this monitor's selection,
+                // resize it; otherwise start a fresh drag selection (D-02).
+                let over_handle = session
+                    .selection()
+                    .filter(|(mi, _)| *mi == monitor_index)
+                    .and_then(|(_, sel)| selection::hit_test_handle(&sel, pos, HANDLE_SIZE));
+                if let Some(h) = over_handle {
+                    session.set_active_handle(Some(h));
+                } else {
+                    session.on_mouse_down(monitor_index, pos);
+                }
+            }
+            redraw_all_overlays(session, windows);
+        }
+        WindowEvent::MouseInput {
+            state: ElementState::Released,
+            button: MouseButton::Left,
+            ..
+        } => {
+            session.on_mouse_up();
+            session.set_active_handle(None);
+            redraw_all_overlays(session, windows);
+        }
+        WindowEvent::KeyboardInput { event, .. } => {
+            if event.state == ElementState::Pressed && event.logical_key == Key::Named(NamedKey::Escape)
+            {
+                // ESC cancels everything (CAP-05, D-04): destroy all overlays,
+                // copy nothing. `cancel` is idempotent (T-2-06).
+                let ids = session.cancel();
+                for id in ids {
+                    windows.destroy(id);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Request a repaint for every live overlay (immediate-mode: any input change
+/// redraws the whole frame — RESEARCH Pitfall 3, keep `ControlFlow::Wait`).
+fn redraw_all_overlays(session: &CaptureSession, windows: &WindowManagerHandle) {
+    let state = session.state();
+    let state = state.lock().unwrap();
+    for id in state.overlay_ids.iter() {
+        windows.redraw(*id);
+    }
+}
+
+/// Draw the selection chrome: white border, 8 handles, and the WxH size label
+/// (CAP-03, D-02).
+fn draw_selection_overlay(pm: &mut PixmapMut, font: &ab_glyph::FontArc, sel: &SelectionRect) {
+    draw_selection_border(pm, sel);
+    draw_handles(pm, sel);
+    draw_size_label(pm, font, sel);
+}
+
+/// White selection border (1.5px), drawn as a stroked rect path.
+fn draw_selection_border(pm: &mut PixmapMut, sel: &SelectionRect) {
+    let Some(rect) = Rect::from_xywh(
+        sel.x0,
+        sel.y0,
+        (sel.x1 - sel.x0).max(0.0),
+        (sel.y1 - sel.y0).max(0.0),
+    ) else {
+        return; // degenerate (zero-size) selection has no border yet
+    };
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(255, 255, 255, 255);
+    let stroke = Stroke {
+        width: 1.5,
+        ..Default::default()
+    };
+    let path = PathBuilder::from_rect(rect);
+    pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+}
+
+/// The 8 resize handles: 6px white squares with a 1px black outline.
+fn draw_handles(pm: &mut PixmapMut, sel: &SelectionRect) {
+    let mut fill = Paint::default();
+    fill.set_color_rgba8(255, 255, 255, 255);
+    let mut outline = Paint::default();
+    outline.set_color_rgba8(0, 0, 0, 255);
+    let stroke = Stroke {
+        width: 1.0,
+        ..Default::default()
+    };
+    for h in selection::HANDLES {
+        let r = selection::handle_rect(sel, h, HANDLE_SIZE);
+        pm.fill_rect(r, &fill, Transform::identity(), None);
+        let path = PathBuilder::from_rect(r);
+        pm.stroke_path(&path, &outline, &stroke, Transform::identity(), None);
+    }
+}
+
+/// The `"{w} × {h}"` label, drawn just above the selection's top-left corner.
+fn draw_size_label(pm: &mut PixmapMut, font: &ab_glyph::FontArc, sel: &SelectionRect) {
+    let w = (sel.x1 - sel.x0).round() as u32;
+    let h = (sel.y1 - sel.y0).round() as u32;
+    let label = format!("{w} × {h}");
+    text::draw_text(pm, font, &label, (sel.x0, sel.y0 - 6.0), 18.0);
 }
 
 #[cfg(test)]
@@ -277,5 +402,26 @@ mod tests {
         let state = session.state();
         let state = state.lock().unwrap();
         assert_eq!(state.pending_overlays, 1);
+    }
+
+    #[test]
+    fn selection_overlay_draws_white_handles() {
+        let font = text::load_font();
+        let mut pixmap = Pixmap::new(100, 100).expect("100x100 pixmap");
+        let sel = SelectionRect {
+            x0: 20.0,
+            y0: 20.0,
+            x1: 80.0,
+            y1: 80.0,
+        };
+        {
+            let mut pm = pixmap.as_mut();
+            draw_selection_overlay(&mut pm, &font, &sel);
+        }
+        // The NW handle is a 6px white square centered on (20, 20); its centre
+        // must be white (border + handle fill are both white).
+        let d = pixmap.data();
+        let idx = ((20 * 100 + 20) * 4) as usize;
+        assert_eq!(&d[idx..idx + 3], &[255, 255, 255], "NW handle must be white");
     }
 }
