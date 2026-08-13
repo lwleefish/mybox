@@ -104,6 +104,15 @@ pub fn elevate_overlay_window(window: &winit::window::Window) {
             // NSStatusWindowLevel (25) is above both the menu bar (24) and the
             // Dock (20); +1 keeps the mask above status-item windows too.
             ns_window.setLevel(objc2_app_kit::NSStatusWindowLevel + 1);
+            // The overlay must stay pinned to the display: lock out both
+            // titlebar/edge dragging (`isMovable`) and background dragging
+            // (`isMovableByWindowBackground`). A borderless NSWindow is still
+            // `isMovable` by default, and combined with winit's `Resizable`
+            // style mask it exposes invisible resize edges — dragging at a
+            // screen edge (where the full-screen overlay's own edge sits) would
+            // resize/move the mask (debug session `overlay-window-movable-at-edge`).
+            ns_window.setMovable(false);
+            ns_window.setMovableByWindowBackground(false);
             log::debug!("overlay: window level raised above menu bar + Dock");
         }
         None => log::warn!("overlay: NSView has no window — level not raised"),
@@ -128,6 +137,7 @@ pub fn window_attributes(spec: &WindowSpec) -> winit::window::WindowAttributes {
             attrs = attrs
                 .with_transparent(true)
                 .with_decorations(false)
+                .with_resizable(false)
                 .with_window_level(winit::window::WindowLevel::AlwaysOnTop);
         }
         WindowKind::Floating => {
@@ -453,6 +463,10 @@ mod window_manager {
         });
         assert!(attrs.transparent, "Overlay must request transparency");
         assert!(!attrs.decorations, "Overlay must be undecorated");
+        assert!(
+            !attrs.resizable,
+            "Overlay must be non-resizable (a borderless resizable window exposes edge-resize gestures at screen edges — overlay-window-movable-at-edge)"
+        );
         assert_eq!(
             attrs.window_level,
             winit::window::WindowLevel::AlwaysOnTop,
