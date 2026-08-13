@@ -40,6 +40,10 @@ type SettingsOpener = Arc<dyn Fn() + Send + Sync>;
 /// Screenshot capture module: hotkey/menu → preflight → worker-thread capture
 /// → `SessionState`.
 pub struct CaptureModule {
+    /// The shared session state (one per module instance). Held by the module
+    /// so tests can reach it (e.g. release the re-entrancy guard) and so the
+    /// production init path and any future shutdown path share one instance.
+    session: Arc<CaptureSession>,
     capture: CaptureFn,
     access: AccessChecker,
     request: AccessRequester,
@@ -51,6 +55,7 @@ impl CaptureModule {
     /// real system prompt / Settings deep link.
     pub fn new() -> Self {
         Self {
+            session: Arc::new(CaptureSession::new()),
             capture: Arc::new(capture_all_monitors),
             access: permission::real_access_checker,
             request: Arc::new(permission::request_access),
@@ -89,7 +94,7 @@ impl Module for CaptureModule {
     }
 
     fn init(&self, ctx: &ModuleContext) -> anyhow::Result<()> {
-        let session = Arc::new(CaptureSession::new());
+        let session = Arc::clone(&self.session);
         // The confirm flow emits `capture/screenshot-taken` from the overlay
         // `on_event` closure; give the session the shared bus to publish onto.
         session.set_bus(Arc::clone(ctx.bus()));
@@ -155,13 +160,18 @@ impl Module for CaptureModule {
         // Pair framework window ids with overlays: the core emits
         // `core/window-created` after each overlay window is created on the main
         // thread; `window_created` records ids so ESC/confirm can destroy them
-        // (CAP-05).
+        // (CAP-05). If the session was torn down before a creation event
+        // arrived, `window_created` reports the window must be destroyed right
+        // away (prevents orphaned gray-mask overlays after a quick cancel).
         let wc_session = Arc::clone(&session);
+        let wc_windows = ctx.windows().clone();
         ctx.on(
             EventFilter::kind("core", "window-created"),
             Box::new(move |e| {
                 if let EventPayload::Framework(FrameworkEvent::WindowCreated(id)) = &e.payload {
-                    wc_session.window_created(*id);
+                    if wc_session.window_created(*id) {
+                        wc_windows.destroy(*id);
+                    }
                 }
             }),
         );
@@ -202,6 +212,12 @@ fn start_capture(
     request: AccessRequester,
     open: SettingsOpener,
 ) {
+    // Re-entrancy guard: a rapid second trigger (hotkey repeat, or hotkey +
+    // tray) must not stack a second set of overlays over the live session.
+    if !session.begin_capture() {
+        log::warn!("capture: already in progress — ignoring duplicate trigger");
+        return;
+    }
     if !check_access(access) {
         log::warn!("capture: macOS Screen Recording permission denied — requesting (CAP-08)");
         request();
@@ -211,6 +227,7 @@ fn start_capture(
                 "capture: 请到 系统设置 → 隐私与安全性 → 屏幕录制 授权 mybox；\
                  授权后可能需要重启 mybox（A1）"
             );
+            session.deactivate();
             return;
         }
     }
@@ -225,7 +242,10 @@ fn start_capture(
                     session.store_shots(shots);
                     overlay::create_overlays(&session, &windows);
                 }
-                Err(e) => log::error!("capture failed: {e:#}"),
+                Err(e) => {
+                    log::error!("capture failed: {e:#}");
+                    session.deactivate();
+                }
             }));
         })
         .expect("spawn capture worker thread");
@@ -331,6 +351,59 @@ mod tests {
     }
 
     #[test]
+    fn start_capture_ignores_duplicate_trigger_while_active() {
+        // The re-entrancy guard: a second trigger while a capture session is
+        // live must be a no-op — it must never stack a second capture/overlay
+        // generation (the mask-accumulation bug).
+        let session = Arc::new(CaptureSession::new());
+        let ui = UiThreadProxy::new();
+        let windows = Arc::new(WindowManagerHandle::new());
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let c1 = count.clone();
+        let c2 = count.clone();
+        let fake: CaptureFn = Arc::new(move || {
+            c1.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![sample_shot()])
+        });
+        let fake2: CaptureFn = Arc::new(move || {
+            c2.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![sample_shot()])
+        });
+
+        start_capture(
+            &session,
+            &ui,
+            Arc::clone(&windows),
+            fake,
+            || true,
+            Arc::new(|| true),
+            Arc::new(|| {}),
+        );
+        // Second trigger while the first session is active: rejected.
+        start_capture(
+            &session,
+            &ui,
+            Arc::clone(&windows),
+            fake2,
+            || true,
+            Arc::new(|| true),
+            Arc::new(|| {}),
+        );
+
+        assert!(
+            wait_until(|| count.load(Ordering::SeqCst) == 1),
+            "exactly one capture must run"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "duplicate trigger must never spawn a second capture"
+        );
+    }
+
+    #[test]
     fn start_capture_denied_requests_then_opens_settings_and_aborts() {
         let session = Arc::new(CaptureSession::new());
         let ui = UiThreadProxy::new();
@@ -393,6 +466,7 @@ mod tests {
         });
 
         let module = CaptureModule {
+            session: Arc::new(CaptureSession::new()),
             capture: fake,
             access: || true,
             request: Arc::new(|| true),
@@ -412,6 +486,10 @@ mod tests {
             wait_until(|| count.load(Ordering::SeqCst) == 1),
             "hotkey path never fired capture"
         );
+
+        // Release the re-entrancy guard (in a real app the user confirms or
+        // cancels between screenshots; headlessly the session never finishes).
+        module.session.finish();
 
         bus.emit(Event {
             from: "core",

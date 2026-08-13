@@ -108,6 +108,16 @@ pub struct SessionState {
     pub pending_annotation: Option<Annotation>,
     pub overlay_ids: Vec<WindowId>,
     pub pending_overlays: usize,
+    /// Re-entrancy guard: true from the moment a capture is triggered until the
+    /// session is finished/cancelled/aborted. Prevents a second trigger (rapid
+    /// hotkey repeat, hotkey + tray) from stacking a second set of overlays.
+    pub active: bool,
+    /// Count of overlay windows that were enqueued but not yet paired with
+    /// their `core/window-created` event when the session was torn down. The
+    /// next `window_created` events (that many, in order) belong to this
+    /// session's late-created overlays and must be destroyed immediately —
+    /// otherwise they would live forever as orphaned gray-mask windows.
+    pub torn_down_pending: usize,
 }
 
 impl Default for SessionState {
@@ -125,6 +135,8 @@ impl Default for SessionState {
             pending_annotation: None,
             overlay_ids: Vec::new(),
             pending_overlays: 0,
+            active: false,
+            torn_down_pending: 0,
         }
     }
 }
@@ -180,15 +192,45 @@ impl CaptureSession {
         log::info!("captured {} monitors", state.shots.len());
     }
 
-    /// Record a created overlay window id (paired with the framework's
-    /// `core/window-created` event). Only tracks windows while overlays are
-    /// pending — used to destroy all overlays on ESC/confirm (CAP-05).
-    pub fn window_created(&self, id: WindowId) {
+    /// Claim the session for a new capture. Returns `false` (and leaves state
+    /// untouched) when a capture is already in flight or overlays are live —
+    /// the re-entrancy guard that prevents stacking overlays.
+    pub fn begin_capture(&self) -> bool {
         let mut state = self.state.lock().unwrap();
+        if state.active {
+            return false;
+        }
+        state.active = true;
+        // A fresh generation starts with clean pairing bookkeeping.
+        state.torn_down_pending = 0;
+        true
+    }
+
+    /// Release the session without teardown (capture error / permission abort).
+    pub fn deactivate(&self) {
+        self.state.lock().unwrap().active = false;
+    }
+
+    /// Record a created overlay window id (paired with the framework's
+    /// `core/window-created` event).
+    ///
+    /// Returns `true` when the window must be destroyed immediately: the
+    /// session was torn down (ESC/confirm) while this window's creation was
+    /// still in flight, so its `window-created` event arrived after the
+    /// session's overlay list was already drained — destroying it now prevents
+    /// an orphaned gray-mask overlay. Returns `false` for windows the session
+    /// tracks normally (and for unrelated windows, which are never tracked).
+    pub fn window_created(&self, id: WindowId) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if state.torn_down_pending > 0 {
+            state.torn_down_pending -= 1;
+            return true;
+        }
         if state.pending_overlays > 0 {
             state.overlay_ids.push(id);
             state.pending_overlays -= 1;
         }
+        false
     }
 
     /// The framework window id for a given monitor's overlay, if already paired
@@ -405,7 +447,17 @@ impl CaptureSession {
         state.last_cursor = None;
         state.pending_annotation = None;
         state.annotations = AnnotationList::default();
+        // Overlays whose `core/window-created` events are still in flight (the
+        // event bus is async) have no paired ids yet — record the count so
+        // `window_created` destroys them when the late events arrive instead of
+        // letting them live on as orphaned gray-mask windows.
+        state.torn_down_pending = state.pending_overlays;
         state.pending_overlays = 0;
+        // Reset interaction state so the next capture starts fresh (WR-04/05:
+        // a stuck tool/ctrl would otherwise trap the user out of Select mode).
+        state.current_tool = Tool::Select;
+        state.ctrl_down = false;
+        state.active = false;
         std::mem::take(&mut state.overlay_ids)
     }
 
@@ -470,14 +522,63 @@ mod tests {
             let mut state = state_arc.lock().unwrap();
             state.pending_overlays = 2;
         }
-        session.window_created(10);
-        session.window_created(20);
-        session.window_created(30); // extra — pending already drained, ignored
+        assert!(!session.window_created(10), "tracked windows are kept");
+        assert!(!session.window_created(20), "tracked windows are kept");
+        assert!(
+            !session.window_created(30),
+            "extra — pending already drained, ignored"
+        );
 
         let state = session.state();
         let state = state.lock().unwrap();
         assert_eq!(state.overlay_ids, vec![10, 20]);
         assert_eq!(state.pending_overlays, 0);
+    }
+
+    #[test]
+    fn begin_capture_guards_against_reentrancy() {
+        let session = CaptureSession::new();
+        assert!(session.begin_capture(), "first claim succeeds");
+        assert!(
+            !session.begin_capture(),
+            "second claim while active is rejected"
+        );
+
+        session.deactivate();
+        assert!(session.begin_capture(), "claim succeeds after deactivate");
+
+        // finish() also releases the guard.
+        session.finish();
+        assert!(session.begin_capture(), "claim succeeds after finish");
+    }
+
+    #[test]
+    fn finish_while_pending_destroys_late_created_windows() {
+        // A session torn down while its overlay creations are still in flight:
+        // the late `window-created` events must report "destroy me" instead of
+        // being tracked, so no orphaned gray-mask overlay survives.
+        let session = CaptureSession::new();
+        {
+            let state_arc = session.state();
+            let mut state = state_arc.lock().unwrap();
+            state.pending_overlays = 2;
+        }
+
+        let ids = session.finish();
+        assert!(ids.is_empty(), "no ids were paired yet");
+
+        assert!(session.window_created(11), "late window must be destroyed");
+        assert!(session.window_created(12), "late window must be destroyed");
+        assert!(
+            !session.window_created(13),
+            "unrelated window is not destroyed"
+        );
+
+        let state = session.state();
+        let state = state.lock().unwrap();
+        assert_eq!(state.torn_down_pending, 0, "late windows all consumed");
+        assert!(state.overlay_ids.is_empty());
+        assert!(!state.active, "finish releases the re-entrancy guard");
     }
 
     #[test]
