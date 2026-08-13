@@ -9,6 +9,7 @@
 pub mod capture;
 pub mod overlay;
 pub mod permission;
+pub mod selection;
 pub mod session;
 
 use std::sync::Arc;

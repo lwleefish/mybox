@@ -9,6 +9,15 @@ use mybox_core::tiny_skia;
 use mybox_core::WindowId;
 
 use crate::capture::MonitorGeom;
+use crate::selection::{self, Handle};
+
+/// Selection interaction phase (CAP-03): drag-select, then adjustable selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    Idle,
+    Selecting,
+    Selected,
+}
 
 /// Selection rectangle in the owning monitor's local pixel coordinates.
 ///
@@ -58,7 +67,15 @@ pub enum Annotation {
 /// confirm/cancel (T-2-01: sensitive pixels don't outlive the session).
 pub struct SessionState {
     pub shots: Vec<(MonitorGeom, xcap::image::RgbaImage)>,
+    pub phase: Phase,
     pub selection: Option<(usize, SelectionRect)>,
+    /// Fixed drag corner, kept while `Selecting` so the selection doesn't flip
+    /// as the cursor crosses the anchor (the stored rect is normalized).
+    pub drag_anchor: Option<tiny_skia::Point>,
+    /// The resize handle currently being dragged (D-02).
+    pub active_handle: Option<Handle>,
+    /// Last known cursor position, used to hit-test handles on mouse-down.
+    pub last_cursor: Option<tiny_skia::Point>,
     pub current_tool: Tool,
     pub annotations: Vec<Annotation>,
     pub overlay_ids: Vec<WindowId>,
@@ -69,7 +86,11 @@ impl Default for SessionState {
     fn default() -> Self {
         Self {
             shots: Vec::new(),
+            phase: Phase::Idle,
             selection: None,
+            drag_anchor: None,
+            active_handle: None,
+            last_cursor: None,
             current_tool: Tool::Select,
             annotations: Vec::new(),
             overlay_ids: Vec::new(),
@@ -121,6 +142,85 @@ impl CaptureSession {
             state.overlay_ids.push(id);
             state.pending_overlays -= 1;
         }
+    }
+
+    /// Current interaction phase.
+    pub fn phase(&self) -> Phase {
+        self.state.lock().unwrap().phase
+    }
+
+    /// Snapshot of the current selection (monitor index + rect), if any.
+    pub fn selection(&self) -> Option<(usize, SelectionRect)> {
+        self.state.lock().unwrap().selection
+    }
+
+    /// Last known cursor position in the overlay (used for handle hit-testing).
+    pub fn last_cursor(&self) -> Option<tiny_skia::Point> {
+        self.state.lock().unwrap().last_cursor
+    }
+
+    /// Begin a drag selection on `monitor` at `pos` (Idle/Selected → Selecting).
+    pub fn on_mouse_down(&self, monitor: usize, pos: tiny_skia::Point) {
+        let mut state = self.state.lock().unwrap();
+        state.phase = Phase::Selecting;
+        state.drag_anchor = Some(pos);
+        state.active_handle = None;
+        state.selection = Some((monitor, selection::drag_start(pos)));
+    }
+
+    /// Update the selection as the cursor moves: drag-select while `Selecting`,
+    /// or resize the active handle while `Selected`.
+    pub fn on_mouse_move(&self, monitor: usize, pos: tiny_skia::Point) {
+        let mut state = self.state.lock().unwrap();
+        state.last_cursor = Some(pos);
+        match state.phase {
+            Phase::Selecting => {
+                if let Some(anchor) = state.drag_anchor {
+                    let anchor_rect = SelectionRect {
+                        x0: anchor.x,
+                        y0: anchor.y,
+                        x1: anchor.x,
+                        y1: anchor.y,
+                    };
+                    let mi = state
+                        .selection
+                        .as_ref()
+                        .map(|(mi, _)| *mi)
+                        .unwrap_or(monitor);
+                    state.selection = Some((mi, selection::drag_update(&anchor_rect, pos)));
+                }
+            }
+            Phase::Selected => {
+                if let Some(h) = state.active_handle {
+                    if let Some((mi, sel)) = state.selection {
+                        if mi == monitor {
+                            state.selection =
+                                Some((mi, selection::apply_handle_drag(&sel, h, pos)));
+                        }
+                    }
+                }
+            }
+            Phase::Idle => {}
+        }
+    }
+
+    /// End a drag: `Selecting` → `Selected`.
+    pub fn on_mouse_up(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.phase == Phase::Selecting {
+            state.phase = Phase::Selected;
+        }
+        state.drag_anchor = None;
+    }
+
+    /// Set (or clear) the handle being dragged.
+    pub fn set_active_handle(&self, h: Option<Handle>) {
+        self.state.lock().unwrap().active_handle = h;
+    }
+
+    /// The currently-dragged handle, if any.
+    pub fn active_handle(&self) -> Option<Handle> {
+        self.state.lock().unwrap().active_handle
     }
 }
 
@@ -175,5 +275,38 @@ mod tests {
         let state = state.lock().unwrap();
         assert_eq!(state.overlay_ids, vec![10, 20]);
         assert_eq!(state.pending_overlays, 0);
+    }
+
+    #[test]
+    fn drag_select_transitions_idle_to_selected() {
+        let session = CaptureSession::new();
+        assert_eq!(session.phase(), Phase::Idle);
+
+        session.on_mouse_down(0, tiny_skia::Point::from_xy(10.0, 10.0));
+        assert_eq!(session.phase(), Phase::Selecting);
+
+        session.on_mouse_move(0, tiny_skia::Point::from_xy(50.0, 60.0));
+        let (mi, sel) = session.selection().expect("selection exists while selecting");
+        assert_eq!(mi, 0);
+        assert_eq!(sel, SelectionRect { x0: 10.0, y0: 10.0, x1: 50.0, y1: 60.0 });
+
+        session.on_mouse_up();
+        assert_eq!(session.phase(), Phase::Selected);
+        assert_eq!(session.selection().map(|(_, s)| s), Some(sel));
+    }
+
+    #[test]
+    fn handle_drag_resizes_selection() {
+        let session = CaptureSession::new();
+        session.on_mouse_down(0, tiny_skia::Point::from_xy(10.0, 10.0));
+        session.on_mouse_move(0, tiny_skia::Point::from_xy(100.0, 100.0));
+        session.on_mouse_up();
+
+        session.set_active_handle(Some(Handle::SE));
+        assert_eq!(session.active_handle(), Some(Handle::SE));
+
+        session.on_mouse_move(0, tiny_skia::Point::from_xy(150.0, 150.0));
+        let (_, sel) = session.selection().unwrap();
+        assert_eq!(sel, SelectionRect { x0: 10.0, y0: 10.0, x1: 150.0, y1: 150.0 });
     }
 }
