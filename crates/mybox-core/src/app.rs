@@ -137,14 +137,7 @@ impl AppBuilder {
         let renderer_factory: RendererFactory = Box::new(|window: Arc<winit::window::Window>| {
             Ok(Box::new(crate::renderer::TinySkiaSoftbufferRenderer::new(window)?))
         });
-        // The WindowManager's own factory is reserved for Phase-2 `batch_create`
-        // (dead code until then); reuse the same renderer construction.
-        let windows = WindowManager::new(Box::new(|window: Arc<winit::window::Window>| {
-            Box::new(
-                crate::renderer::TinySkiaSoftbufferRenderer::new(window)
-                    .expect("tiny-skia softbuffer renderer"),
-            )
-        }));
+        let windows = WindowManager::new();
 
         Ok(App {
             registry: self.registry,
@@ -347,6 +340,23 @@ impl App {
     }
 }
 
+/// Draw content then present for a window state (RESEARCH Pattern 1).
+///
+/// Calls `renderer.draw` with the spec's `on_draw` closure (wrapped in
+/// `catch_unwind` so a panicking module draw closure cannot kill the event
+/// loop - T-2-03), then `renderer.present()`. This is the wired content
+/// pipeline that was missing in Phase 1 (WR-05).
+fn handle_redraw(state: &mut crate::window::WindowState) {
+    if let Some(draw) = &state.spec.on_draw {
+        state.renderer.draw(&mut |pixmap, w, h| {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| draw(pixmap, w, h)));
+        });
+    }
+    if let Err(e) = state.renderer.present() {
+        log::warn!("renderer present failed: {e}");
+    }
+}
+
 impl winit::application::ApplicationHandler<AppEvent> for App {
     /// The app is live (macOS Accessory). Phase 1 opens no startup window; the
     /// skeleton's test window is created on demand by the hotkey path.
@@ -369,9 +379,7 @@ impl winit::application::ApplicationHandler<AppEvent> for App {
             }
             match event {
                 winit::event::WindowEvent::RedrawRequested => {
-                    if let Err(e) = state.renderer.present() {
-                        log::warn!("renderer present failed: {e}");
-                    }
+                    handle_redraw(state);
                 }
                 winit::event::WindowEvent::Resized(size) => {
                     state.renderer.resize(size.width, size.height);
@@ -393,7 +401,9 @@ impl winit::application::ApplicationHandler<AppEvent> for App {
         match event {
             AppEvent::Hotkey(e) => self.on_hotkey(e),
             AppEvent::Menu(e) => self.on_menu(e),
-            AppEvent::Ui(f) => f(),
+            AppEvent::Ui(f) => {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+            }
             AppEvent::Tray(_) => log::debug!("tray icon event (ignored in Phase 1)"),
             AppEvent::WindowRequested => {}
         }
@@ -413,6 +423,13 @@ impl winit::application::ApplicationHandler<AppEvent> for App {
                 }
                 WindowRequest::Destroy(id) => {
                     self.windows.destroy(id);
+                }
+                WindowRequest::Redraw(id) => {
+                    if let Some(s) = self.windows.get_mut(id) {
+                        if let Some(w) = &s.window {
+                            w.request_redraw();
+                        }
+                    }
                 }
             }
         }
@@ -437,6 +454,25 @@ mod tests {
         }
     }
 
+    /// Recording renderer: logs the order of `draw` / `present` calls so tests
+    /// can assert the draw-then-present sequence (RESEARCH Pattern 1).
+    struct RecordingRenderer {
+        calls: Arc<parking_lot::Mutex<Vec<&'static str>>>,
+    }
+    impl Renderer for RecordingRenderer {
+        fn resize(&mut self, _width: u32, _height: u32) {}
+        fn draw(&mut self, f: &mut dyn FnMut(&mut tiny_skia::PixmapMut, u32, u32)) {
+            self.calls.lock().push("draw");
+            // Invoke the closure so the on_draw path is exercised.
+            let mut pixmap = tiny_skia::Pixmap::new(1, 1).expect("1x1 pixmap");
+            f(&mut pixmap.as_mut(), 1, 1);
+        }
+        fn present(&mut self) -> Result<()> {
+            self.calls.lock().push("present");
+            Ok(())
+        }
+    }
+
     fn mock_factory() -> RendererFactory {
         Box::new(|_w: Arc<winit::window::Window>| Ok(Box::new(MockRenderer) as Box<dyn Renderer>))
     }
@@ -450,9 +486,7 @@ mod tests {
         App {
             registry: ModuleRegistry::new(),
             bus,
-            windows: WindowManager::new(Box::new(|_w: Arc<winit::window::Window>| {
-                Box::new(MockRenderer) as Box<dyn Renderer>
-            })),
+            windows: WindowManager::new(),
             window_rx,
             window_handle,
             config: Arc::new(ConfigCenter::default()),
@@ -602,6 +636,7 @@ mod tests {
         match app.window_rx.try_recv() {
             Ok(WindowRequest::Create(s)) => assert_eq!(s.title, "plumbing"),
             Ok(WindowRequest::Destroy(_)) => panic!("expected Create, got Destroy"),
+            Ok(WindowRequest::Redraw(_)) => panic!("expected Create, got Redraw"),
             Err(_) => panic!("enqueued Create request never reached the App's window_rx"),
         }
     }
@@ -629,6 +664,49 @@ mod tests {
             EventPayload::Module(v) => assert_eq!(v["menu_id"], "test.open_window"),
             other => panic!("expected Module payload, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn redraw_draws_then_presents() {
+        // RESEARCH Pattern 1: handle_redraw must call draw() before present(),
+        // and the on_draw closure must be invoked inside draw.
+        let calls: Arc<parking_lot::Mutex<Vec<&'static str>>> =
+            Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let renderer = RecordingRenderer { calls: calls.clone() };
+
+        let drew: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+        let drew_clone = drew.clone();
+        let on_draw: Option<Box<dyn Fn(&mut tiny_skia::PixmapMut, u32, u32) + Send + Sync>> =
+            Some(Box::new(move |_pm, _w, _h| {
+                drew_clone.fetch_add(1, Ordering::SeqCst);
+            }));
+
+        let spec = WindowSpec {
+            on_draw,
+            ..Default::default()
+        };
+        let mut state = crate::window::WindowState::new(
+            1,
+            crate::window::WindowKind::Panel,
+            winit::window::WindowId::from(1u64),
+            None,
+            Box::new(renderer),
+            spec,
+        );
+
+        handle_redraw(&mut state);
+
+        let recorded = calls.lock();
+        assert_eq!(
+            *recorded,
+            vec!["draw", "present"],
+            "handle_redraw must call draw before present"
+        );
+        assert_eq!(
+            drew.load(Ordering::SeqCst),
+            1,
+            "on_draw closure must be invoked exactly once"
+        );
     }
 
     // NOTE: `user_event` itself is not unit-tested — it takes `&ActiveEventLoop`,

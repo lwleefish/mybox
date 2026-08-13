@@ -33,6 +33,7 @@ pub use tray::{build_menu, generate_icon, TrayManager};
 // crates.
 pub use anyhow;
 pub use log;
+pub use tiny_skia;
 pub use toml;
 pub use tray_icon;
 pub use window::{

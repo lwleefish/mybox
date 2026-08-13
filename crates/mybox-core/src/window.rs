@@ -39,6 +39,10 @@ pub struct WindowSpec {
     pub position: Option<(i32, i32)>,
     /// Per-window event callback (D-07 routing target).
     pub on_event: Option<Box<dyn Fn(&winit::event::WindowEvent) + Send + Sync>>,
+    /// Per-window draw callback (Phase 2): receives the tiny-skia pixmap and its
+    /// size so the module can composite content (capture blit, mask, annotations,
+    /// toolbar). Invoked by `handle_redraw` on the main thread before `present()`.
+    pub on_draw: Option<Box<dyn Fn(&mut tiny_skia::PixmapMut, u32, u32) + Send + Sync>>,
 }
 
 impl Default for WindowSpec {
@@ -53,6 +57,7 @@ impl Default for WindowSpec {
             inner_size: None,
             position: None,
             on_event: None,
+            on_draw: None,
         }
     }
 }
@@ -149,6 +154,9 @@ impl WindowState {
 pub enum WindowRequest {
     Create(WindowSpec),
     Destroy(WindowId),
+    /// Request a redraw for a window (Phase 2). The App drains this in
+    /// `about_to_wait` and calls `window.request_redraw()` on the main thread.
+    Redraw(WindowId),
 }
 
 /// Module-side handle to the window manager. Modules call `create`/`destroy`,
@@ -198,6 +206,14 @@ impl WindowManagerHandle {
         self.trigger_wake();
     }
 
+    /// Enqueue a redraw request and wake the loop (Phase 2). Modules call this
+    /// from the bus worker thread; the App drains it in `about_to_wait` and
+    /// calls `window.request_redraw()` on the main thread.
+    pub fn redraw(&self, id: WindowId) {
+        let _ = self.tx.send(WindowRequest::Redraw(id));
+        self.trigger_wake();
+    }
+
     /// Inject the wake-up hook. Default is `None` (no-op). The App installs a
     /// hook that pulses `AppEvent::WindowRequested` into the winit loop.
     pub fn set_wakeup(&self, wake: Arc<dyn Fn() + Send + Sync + 'static>) {
@@ -228,27 +244,16 @@ impl Default for WindowManagerHandle {
 pub struct WindowManager {
     states: HashMap<WindowId, WindowState>,
     next_id: WindowId,
-    /// Injectable window→renderer mapper used by Phase-2 `batch_create`;
-    /// stored here so it is available to future plans (kept dead-code-annotated
-    /// until then). Takes the `Arc`-shared window (the renderer owns it).
-    #[allow(dead_code)]
-    renderer_factory:
-        Box<dyn Fn(Arc<winit::window::Window>) -> Box<dyn Renderer> + Send + Sync>,
 }
 
 impl WindowManager {
-    /// Create an empty manager. The injectable `renderer_factory` maps a live
-    /// window to its renderer (used by batch creation in Phase 2; mockable in
-    /// tests).
-    pub fn new(
-        renderer_factory: Box<
-            dyn Fn(Arc<winit::window::Window>) -> Box<dyn Renderer> + Send + Sync,
-        >,
-    ) -> Self {
+    /// Create an empty manager. Renderers are constructed per-window in
+    /// `App::create_window` via the App's own `renderer_factory`; the manager
+    /// only owns the id -> state routing table.
+    pub fn new() -> Self {
         Self {
             states: HashMap::new(),
             next_id: 1,
-            renderer_factory,
         }
     }
 
@@ -292,17 +297,6 @@ impl WindowManager {
     pub fn close_all(&mut self) {
         self.states.clear();
     }
-
-    /// Batch window creation (D-09 per-monitor overlays, Phase 2).
-    ///
-    /// Phase-1 placeholder: returns the next `specs.len()` ids without creating
-    /// any window or advancing the counter. Phase 2 replaces this with real
-    /// per-monitor `ActiveEventLoop::create_window` calls.
-    pub fn batch_create(&self, specs: Vec<WindowSpec>) -> Vec<WindowId> {
-        let start = self.next_id;
-        let count = specs.len() as u64;
-        (start..start + count).collect()
-    }
 }
 
 #[cfg(test)]
@@ -330,6 +324,7 @@ mod tests {
         assert!(spec.inner_size.is_none());
         assert!(spec.position.is_none());
         assert!(spec.on_event.is_none());
+        assert!(spec.on_draw.is_none());
     }
 
     #[test]
@@ -369,11 +364,6 @@ mod window_manager {
         fn present(&mut self) -> crate::error::Result<()> {
             Ok(())
         }
-    }
-
-    fn mock_factory(
-    ) -> Box<dyn Fn(Arc<winit::window::Window>) -> Box<dyn Renderer> + Send + Sync> {
-        Box::new(|_w: Arc<winit::window::Window>| Box::new(MockRenderer) as Box<dyn Renderer>)
     }
 
     fn register_dummy(wm: &mut WindowManager, id: WindowId, winit_id: winit::window::WindowId) {
@@ -461,7 +451,7 @@ mod window_manager {
 
     #[test]
     fn next_id_increments_monotonically() {
-        let mut wm = WindowManager::new(mock_factory());
+        let mut wm = WindowManager::new();
         let a = wm.next_id();
         let b = wm.next_id();
         assert!(a < b, "next_id must increase");
@@ -469,7 +459,7 @@ mod window_manager {
 
     #[test]
     fn register_then_get_mut_and_destroy() {
-        let mut wm = WindowManager::new(mock_factory());
+        let mut wm = WindowManager::new();
         let id = wm.next_id();
         register_dummy(&mut wm, id, winit::window::WindowId::from(1u64));
         assert!(wm.get_mut(id).is_some(), "registered state must be found");
@@ -479,7 +469,7 @@ mod window_manager {
 
     #[test]
     fn consecutive_registers_get_distinct_ids() {
-        let mut wm = WindowManager::new(mock_factory());
+        let mut wm = WindowManager::new();
         let id1 = wm.next_id();
         let id2 = wm.next_id();
         register_dummy(&mut wm, id1, winit::window::WindowId::from(1u64));
@@ -491,7 +481,7 @@ mod window_manager {
 
     #[test]
     fn get_mut_by_winit_hits_correct_state() {
-        let mut wm = WindowManager::new(mock_factory());
+        let mut wm = WindowManager::new();
         let id1 = wm.next_id();
         let id2 = wm.next_id();
         register_dummy(&mut wm, id1, winit::window::WindowId::from(100u64));
@@ -513,7 +503,7 @@ mod window_manager {
 
     #[test]
     fn close_all_empties_state_table() {
-        let mut wm = WindowManager::new(mock_factory());
+        let mut wm = WindowManager::new();
         let id1 = wm.next_id();
         let id2 = wm.next_id();
         register_dummy(&mut wm, id1, winit::window::WindowId::from(1u64));
@@ -521,14 +511,6 @@ mod window_manager {
         wm.close_all();
         assert!(wm.get_mut(id1).is_none());
         assert!(wm.get_mut(id2).is_none());
-    }
-
-    #[test]
-    fn batch_create_returns_distinct_placeholder_ids() {
-        let wm = WindowManager::new(mock_factory());
-        let ids = wm.batch_create(vec![WindowSpec::default(), WindowSpec::default()]);
-        assert_eq!(ids.len(), 2);
-        assert_ne!(ids[0], ids[1]);
     }
 
     #[test]
@@ -545,6 +527,8 @@ mod window_manager {
         assert_eq!(calls.load(Ordering::SeqCst), 1, "create must wake once");
         handle.destroy(42);
         assert_eq!(calls.load(Ordering::SeqCst), 2, "destroy must wake once");
+        handle.redraw(42);
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "redraw must wake once");
     }
 
     #[test]
@@ -554,6 +538,8 @@ mod window_manager {
         assert!(matches!(handle.try_recv(), Some(WindowRequest::Create(_))));
         handle.destroy(7);
         assert!(matches!(handle.try_recv(), Some(WindowRequest::Destroy(7))));
+        handle.redraw(7);
+        assert!(matches!(handle.try_recv(), Some(WindowRequest::Redraw(7))));
         assert!(handle.try_recv().is_none(), "queue must be empty after draining");
     }
 }

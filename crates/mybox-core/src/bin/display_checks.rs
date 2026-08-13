@@ -39,10 +39,7 @@ impl WindowHarness {
     fn new(spec: WindowSpec) -> Self {
         Self {
             spec,
-            wm: WindowManager::new(Box::new(|window: Arc<winit::window::Window>| {
-                Box::new(TinySkiaSoftbufferRenderer::new(window).expect("renderer"))
-                    as Box<dyn Renderer>
-            })),
+            wm: WindowManager::new(),
             created_id: None,
             presented: false,
             deadline: None,
