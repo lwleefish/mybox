@@ -8,8 +8,10 @@ use mybox_core::log;
 use mybox_core::tiny_skia;
 use mybox_core::WindowId;
 
+use crate::annotate::AnnotationList;
 use crate::capture::MonitorGeom;
 use crate::selection::{self, Handle};
+use crate::toolbar::ToolAction;
 
 /// Selection interaction phase (CAP-03): drag-select, then adjustable selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +35,7 @@ pub struct SelectionRect {
 }
 
 /// Active annotation tool (unified mode, D-03 — no explicit mode switch).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
     Select,
     Rect,
@@ -64,6 +67,12 @@ pub enum Annotation {
     },
 }
 
+/// Default text placed by the text tool on click (A6: no text editing in MVP —
+/// a fixed label is placed once; editing lands in a later plan).
+pub const DEFAULT_TEXT_ANNOTATION: &str = "Text";
+/// Default size (physical px) of a placed text annotation.
+pub const DEFAULT_TEXT_SIZE: f32 = 18.0;
+
 /// Shared per-session state. Held per session (not per app) and dropped on
 /// confirm/cancel (T-2-01: sensitive pixels don't outlive the session).
 pub struct SessionState {
@@ -77,8 +86,15 @@ pub struct SessionState {
     pub active_handle: Option<Handle>,
     /// Last known cursor position, used to hit-test handles on mouse-down.
     pub last_cursor: Option<tiny_skia::Point>,
+    /// Whether Ctrl (or Cmd on macOS) is currently held, tracked via
+    /// `ModifiersChanged` so Ctrl+Z can be detected on `KeyboardInput`.
+    pub ctrl_down: bool,
     pub current_tool: Tool,
-    pub annotations: Vec<Annotation>,
+    /// Retained annotations (undo = pop + full redraw — CAP-07).
+    pub annotations: AnnotationList,
+    /// The in-progress annotation being drawn (rendered but not yet committed
+    /// to `annotations` until the drag finishes).
+    pub pending_annotation: Option<Annotation>,
     pub overlay_ids: Vec<WindowId>,
     pub pending_overlays: usize,
 }
@@ -92,8 +108,10 @@ impl Default for SessionState {
             drag_anchor: None,
             active_handle: None,
             last_cursor: None,
+            ctrl_down: false,
             current_tool: Tool::Select,
-            annotations: Vec::new(),
+            annotations: AnnotationList::default(),
+            pending_annotation: None,
             overlay_ids: Vec::new(),
             pending_overlays: 0,
         }
@@ -174,6 +192,9 @@ impl CaptureSession {
     pub fn on_mouse_move(&self, monitor: usize, pos: tiny_skia::Point) {
         let mut state = self.state.lock().unwrap();
         state.last_cursor = Some(pos);
+        // Track the in-progress annotation drag (rect/arrow/pen) in parallel
+        // with the selection/handle drag (D-03: both coexist).
+        update_pending_annotation(&mut state, pos);
         match state.phase {
             Phase::Selecting => {
                 if let Some(anchor) = state.drag_anchor {
@@ -224,6 +245,91 @@ impl CaptureSession {
         self.state.lock().unwrap().active_handle
     }
 
+    /// The active annotation tool (D-03).
+    pub fn current_tool(&self) -> Tool {
+        self.state.lock().unwrap().current_tool
+    }
+
+    /// Handle a toolbar action: switch tool, pop an annotation, or (02-04)
+    /// confirm/cancel — the latter two are logged for now (CAP-04 lands next).
+    pub fn tool_action(&self, action: ToolAction) {
+        match action {
+            ToolAction::Tool(t) => {
+                self.state.lock().unwrap().current_tool = t;
+            }
+            ToolAction::Undo => {
+                self.undo();
+            }
+            ToolAction::Confirm => {
+                log::info!("capture: confirm requested (clipboard copy wired in 02-04)");
+            }
+            ToolAction::Cancel => {
+                log::info!("capture: cancel requested (wired in 02-04)");
+            }
+        }
+    }
+
+    /// Pop the most recent annotation (Ctrl+Z, CAP-07). Returns whether an
+    /// annotation was actually undone.
+    pub fn undo(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        state.annotations.undo().is_some()
+    }
+
+    /// Append a completed annotation to the retained list.
+    pub fn push_annotation(&self, ann: Annotation) {
+        self.state.lock().unwrap().annotations.push(ann);
+    }
+
+    /// Track the Ctrl/Cmd modifier state (via `ModifiersChanged`).
+    pub fn set_ctrl_down(&self, down: bool) {
+        self.state.lock().unwrap().ctrl_down = down;
+    }
+
+    /// Whether Ctrl (or Cmd) is currently held.
+    pub fn ctrl_down(&self) -> bool {
+        self.state.lock().unwrap().ctrl_down
+    }
+
+    /// Begin an annotation at `pos`, routed by the current tool. Rect/Arrow/Pen
+    /// set a `pending_annotation`; Text is placed immediately (A6: no editing).
+    pub fn on_annotation_start(&self, pos: tiny_skia::Point) {
+        let mut state = self.state.lock().unwrap();
+        match state.current_tool {
+            Tool::Rect => {
+                state.pending_annotation = Some(Annotation::Rect { a: pos, b: pos });
+            }
+            Tool::Arrow => {
+                state.pending_annotation = Some(Annotation::Arrow { a: pos, b: pos });
+            }
+            Tool::Pen => {
+                state.pending_annotation = Some(Annotation::Pen { pts: vec![pos] });
+            }
+            Tool::Text => {
+                state.annotations.push(Annotation::Text {
+                    at: pos,
+                    s: DEFAULT_TEXT_ANNOTATION.to_string(),
+                    size: DEFAULT_TEXT_SIZE,
+                });
+            }
+            Tool::Select => {}
+        }
+    }
+
+    /// Update the in-progress annotation's endpoint/path as the cursor moves.
+    pub fn on_annotation_update(&self, pos: tiny_skia::Point) {
+        let mut state = self.state.lock().unwrap();
+        update_pending_annotation(&mut state, pos);
+    }
+
+    /// Commit the in-progress annotation into the retained list.
+    pub fn on_annotation_finish(&self) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(ann) = state.pending_annotation.take() {
+            state.annotations.push(ann);
+        }
+    }
+
     /// Cancel the whole capture (ESC, D-04): reset to `Idle`, clear the
     /// selection, and hand back the overlay window ids to destroy. Idempotent —
     /// `overlay_ids` is drained, so a repeated ESC destroys nothing (T-2-06).
@@ -235,6 +341,16 @@ impl CaptureSession {
         state.active_handle = None;
         state.last_cursor = None;
         std::mem::take(&mut state.overlay_ids)
+    }
+}
+
+/// Update the endpoint of the in-progress rect/arrow, or append a point to the
+/// in-progress pen path. No-op when nothing is pending.
+fn update_pending_annotation(state: &mut SessionState, pos: tiny_skia::Point) {
+    match &mut state.pending_annotation {
+        Some(Annotation::Rect { b, .. }) | Some(Annotation::Arrow { b, .. }) => *b = pos,
+        Some(Annotation::Pen { pts }) => pts.push(pos),
+        _ => {}
     }
 }
 
@@ -348,5 +464,87 @@ mod tests {
 
         // Idempotent: overlay_ids is drained, so a second cancel returns nothing.
         assert_eq!(session.cancel(), Vec::<WindowId>::new());
+    }
+
+    #[test]
+    fn tool_action_switches_current_tool() {
+        let session = CaptureSession::new();
+        assert_eq!(session.current_tool(), Tool::Select);
+
+        session.tool_action(ToolAction::Tool(Tool::Rect));
+        assert_eq!(session.current_tool(), Tool::Rect);
+
+        session.tool_action(ToolAction::Tool(Tool::Pen));
+        assert_eq!(session.current_tool(), Tool::Pen);
+    }
+
+    #[test]
+    fn rect_annotation_drag_produces_one_rect() {
+        let session = CaptureSession::new();
+        session.tool_action(ToolAction::Tool(Tool::Rect));
+
+        session.on_annotation_start(tiny_skia::Point::from_xy(10.0, 10.0));
+        session.on_annotation_update(tiny_skia::Point::from_xy(50.0, 60.0));
+        session.on_annotation_finish();
+
+        let state_arc = session.state();
+        let state = state_arc.lock().unwrap();
+        assert_eq!(state.annotations.items.len(), 1);
+        assert_eq!(
+            state.annotations.items[0],
+            Annotation::Rect {
+                a: tiny_skia::Point::from_xy(10.0, 10.0),
+                b: tiny_skia::Point::from_xy(50.0, 60.0),
+            }
+        );
+        assert!(state.pending_annotation.is_none(), "finished annotation must not stay pending");
+    }
+
+    #[test]
+    fn undo_to_empty_equals_original_image() {
+        let session = CaptureSession::new();
+        session.tool_action(ToolAction::Tool(Tool::Rect));
+
+        // Draw three rects (CAP-07: undo back to the original image).
+        for i in 0..3 {
+            let x = i as f32 * 10.0;
+            session.on_annotation_start(tiny_skia::Point::from_xy(x, x));
+            session.on_annotation_update(tiny_skia::Point::from_xy(x + 5.0, x + 5.0));
+            session.on_annotation_finish();
+        }
+        {
+            let state_arc = session.state();
+            let state = state_arc.lock().unwrap();
+            assert_eq!(state.annotations.items.len(), 3);
+        }
+
+        assert!(session.undo(), "first undo must pop an annotation");
+        assert!(session.undo());
+        assert!(session.undo());
+        assert!(!session.undo(), "undo on an empty list must report false");
+
+        let state_arc = session.state();
+        let state = state_arc.lock().unwrap();
+        assert!(state.annotations.is_empty(), "undo to empty == original image (CAP-07)");
+    }
+
+    #[test]
+    fn text_tool_places_immediately() {
+        let session = CaptureSession::new();
+        session.tool_action(ToolAction::Tool(Tool::Text));
+        session.on_annotation_start(tiny_skia::Point::from_xy(30.0, 40.0));
+
+        let state_arc = session.state();
+        let state = state_arc.lock().unwrap();
+        assert_eq!(state.annotations.items.len(), 1, "text is placed immediately (A6)");
+        assert_eq!(
+            state.annotations.items[0],
+            Annotation::Text {
+                at: tiny_skia::Point::from_xy(30.0, 40.0),
+                s: DEFAULT_TEXT_ANNOTATION.to_string(),
+                size: DEFAULT_TEXT_SIZE,
+            }
+        );
+        assert!(state.pending_annotation.is_none(), "text never enters the pending slot");
     }
 }

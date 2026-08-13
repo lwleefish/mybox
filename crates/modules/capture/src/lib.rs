@@ -13,6 +13,7 @@ pub mod permission;
 pub mod selection;
 pub mod session;
 pub mod text;
+pub mod toolbar;
 
 use std::sync::Arc;
 

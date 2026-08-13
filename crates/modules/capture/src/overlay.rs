@@ -17,8 +17,9 @@ use mybox_core::winit::event::{ElementState, MouseButton, WindowEvent};
 use mybox_core::winit::keyboard::{Key, NamedKey};
 
 use crate::selection;
-use crate::session::{CaptureSession, SelectionRect};
+use crate::session::{CaptureSession, SelectionRect, Tool};
 use crate::text;
+use crate::toolbar;
 
 /// Dimming-mask opacity (CAP-02: semi-transparent black over the un-selected
 /// area).
@@ -78,7 +79,13 @@ pub fn create_overlays(session: &CaptureSession, windows: &Arc<WindowManagerHand
             inner_size: Some((width, height)),
             position: Some((x, y)),
             on_event: Some(Box::new(move |event| {
-                handle_overlay_event(&session_event, &event_windows, monitor_index, event);
+                handle_overlay_event(
+                    &session_event,
+                    &event_windows,
+                    monitor_index,
+                    width as f32,
+                    event,
+                );
             })),
             on_draw: Some(Box::new(move |pm, w, h| {
                 draw_overlay(pm, w, h, &session_draw, monitor_index);
@@ -118,10 +125,24 @@ fn draw_overlay(
         .map(|(_, rect)| *rect);
     composite_frame(pm, w, h, shot, selection.as_ref());
 
-    // Selection border + handles + WxH only on the monitor that owns it.
+    // Selection chrome + annotations + toolbar only on the monitor that owns it.
     if let Some(sel) = selection {
         let font = text::load_font();
         draw_selection_overlay(pm, &font, &sel);
+
+        // Retained + in-progress annotations (immediate-mode: full redraw from
+        // the list every frame — never baked into pixels, T-2-10).
+        if let Some(pending) = &state.pending_annotation {
+            pending.draw(pm);
+        }
+        for ann in state.annotations.iter() {
+            ann.draw(pm);
+        }
+
+        // Unified no-modes toolbar, anchored below the selection's bottom-left
+        // (D-03).
+        let buttons = toolbar::layout_buttons((sel.x0, sel.y1), w as f32);
+        toolbar::draw_toolbar(pm, &buttons, state.current_tool);
     }
 }
 
@@ -184,17 +205,21 @@ fn draw_mask_outside(pm: &mut PixmapMut, w: f32, h: f32, sel: &SelectionRect, ma
     fill_rect_safe(pm, sel.x1, sel.y0, w - sel.x1, sel.y1 - sel.y0, mask); // right
 }
 
-/// Per-window input routing (CAP-03/05, D-02/D-04): drag-select, handle resize,
+/// Per-window input routing (CAP-03/05/06/07, D-02/D-03/D-04): drag-select,
+/// handle resize, toolbar actions, tool-driven annotation input, Ctrl+Z undo,
 /// and ESC cancel. Runs on the main thread from the core's `window_event` route.
 fn handle_overlay_event(
     session: &CaptureSession,
     windows: &WindowManagerHandle,
     monitor_index: usize,
+    screen_w: f32,
     event: &WindowEvent,
 ) {
     match event {
         WindowEvent::CursorMoved { position, .. } => {
             let pos = Point::from_xy(position.x as f32, position.y as f32);
+            // Handles the selection drag, active-handle resize, and the
+            // in-progress annotation endpoint/path (D-03: all coexist).
             session.on_mouse_move(monitor_index, pos);
             redraw_all_overlays(session, windows);
         }
@@ -204,8 +229,21 @@ fn handle_overlay_event(
             ..
         } => {
             if let Some(pos) = session.last_cursor() {
+                // Toolbar takes priority (only present once a selection exists).
+                let toolbar_action = session
+                    .selection()
+                    .filter(|(mi, _)| *mi == monitor_index)
+                    .map(|(_, sel)| toolbar::layout_buttons((sel.x0, sel.y1), screen_w))
+                    .and_then(|buttons| toolbar::hit_test(&buttons, pos));
+                if let Some(action) = toolbar_action {
+                    session.tool_action(action);
+                    redraw_all_overlays(session, windows);
+                    return;
+                }
+
                 // If the cursor is over a handle of this monitor's selection,
-                // resize it; otherwise start a fresh drag selection (D-02).
+                // resize it; otherwise start a fresh drag selection (D-02), or
+                // begin an annotation for the active tool (D-03).
                 let over_handle = session
                     .selection()
                     .filter(|(mi, _)| *mi == monitor_index)
@@ -213,7 +251,10 @@ fn handle_overlay_event(
                 if let Some(h) = over_handle {
                     session.set_active_handle(Some(h));
                 } else {
-                    session.on_mouse_down(monitor_index, pos);
+                    match session.current_tool() {
+                        Tool::Select => session.on_mouse_down(monitor_index, pos),
+                        _ => session.on_annotation_start(pos),
+                    }
                 }
             }
             redraw_all_overlays(session, windows);
@@ -224,18 +265,30 @@ fn handle_overlay_event(
             ..
         } => {
             session.on_mouse_up();
+            session.on_annotation_finish();
             session.set_active_handle(None);
             redraw_all_overlays(session, windows);
         }
+        WindowEvent::ModifiersChanged(mods) => {
+            let state = mods.state();
+            // CAP-07 text says "Ctrl+Z"; on macOS also accept Cmd.
+            session.set_ctrl_down(state.control_key() || state.super_key());
+        }
         WindowEvent::KeyboardInput { event, .. } => {
-            if event.state == ElementState::Pressed && event.logical_key == Key::Named(NamedKey::Escape)
-            {
+            if event.state != ElementState::Pressed {
+                return;
+            }
+            if event.logical_key == Key::Named(NamedKey::Escape) {
                 // ESC cancels everything (CAP-05, D-04): destroy all overlays,
                 // copy nothing. `cancel` is idempotent (T-2-06).
                 let ids = session.cancel();
                 for id in ids {
                     windows.destroy(id);
                 }
+            } else if event.logical_key == "z" && session.ctrl_down() {
+                // Ctrl+Z (Cmd+Z on macOS) undoes the last annotation (CAP-07).
+                session.undo();
+                redraw_all_overlays(session, windows);
             }
         }
         _ => {}
