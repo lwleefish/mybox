@@ -135,6 +135,38 @@ pub fn drag_update(sel: &SelectionRect, pos: Point) -> SelectionRect {
     })
 }
 
+/// Translate a selection by `(dx, dy)` without changing its size (move).
+pub fn translate(sel: &SelectionRect, dx: f32, dy: f32) -> SelectionRect {
+    SelectionRect {
+        x0: sel.x0 + dx,
+        y0: sel.y0 + dy,
+        x1: sel.x1 + dx,
+        y1: sel.y1 + dy,
+    }
+}
+
+/// Translate a selection, clamped so it stays fully inside the owning
+/// monitor's bounds (`max_w` × `max_h`). When the selection is larger than the
+/// monitor (shouldn't happen), its origin pins to `(0, 0)`.
+pub fn translate_clamped(
+    sel: &SelectionRect,
+    dx: f32,
+    dy: f32,
+    max_w: f32,
+    max_h: f32,
+) -> SelectionRect {
+    let w = sel.x1 - sel.x0;
+    let h = sel.y1 - sel.y0;
+    let x0 = (sel.x0 + dx).clamp(0.0, (max_w - w).max(0.0));
+    let y0 = (sel.y0 + dy).clamp(0.0, (max_h - h).max(0.0));
+    SelectionRect {
+        x0,
+        y0,
+        x1: x0 + w,
+        y1: y0 + h,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,6 +261,36 @@ mod tests {
         assert_eq!(
             apply_handle_drag(&sel, Handle::SE, p(0.0, 0.0)),
             rect(10.0, 10.0, 14.0, 14.0)
+        );
+    }
+
+    #[test]
+    fn translate_moves_selection_without_resizing() {
+        let sel = rect(10.0, 20.0, 110.0, 120.0);
+        assert_eq!(
+            translate(&sel, 30.0, -5.0),
+            rect(40.0, 15.0, 140.0, 115.0),
+            "size must be preserved"
+        );
+    }
+
+    #[test]
+    fn translate_clamped_keeps_selection_inside_monitor() {
+        let sel = rect(10.0, 10.0, 110.0, 110.0);
+        // Far past the right/bottom edges: pinned to the monitor bounds.
+        assert_eq!(
+            translate_clamped(&sel, 500.0, 500.0, 200.0, 150.0),
+            rect(100.0, 50.0, 200.0, 150.0)
+        );
+        // Far past the top-left: pinned to the origin.
+        assert_eq!(
+            translate_clamped(&sel, -500.0, -500.0, 200.0, 150.0),
+            rect(0.0, 0.0, 100.0, 100.0)
+        );
+        // Inside the bounds: plain translation.
+        assert_eq!(
+            translate_clamped(&sel, 5.0, 5.0, 200.0, 150.0),
+            rect(15.0, 15.0, 115.0, 115.0)
         );
     }
 }

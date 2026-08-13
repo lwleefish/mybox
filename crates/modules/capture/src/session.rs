@@ -18,6 +18,8 @@ use crate::toolbar::ToolAction;
 pub enum Phase {
     Idle,
     Selecting,
+    /// Dragging inside the selection to move it (the Move-cursor branch).
+    Moving,
     Selected,
 }
 
@@ -93,6 +95,11 @@ pub struct SessionState {
     /// Fixed drag corner, kept while `Selecting` so the selection doesn't flip
     /// as the cursor crosses the anchor (the stored rect is normalized).
     pub drag_anchor: Option<tiny_skia::Point>,
+    /// The press position when a selection move (`Moving`) began.
+    pub move_anchor: Option<tiny_skia::Point>,
+    /// The selection rect at the moment the move began — the base every move
+    /// update translates from (no per-frame drift accumulation).
+    pub move_rect: Option<SelectionRect>,
     /// The resize handle currently being dragged (D-02).
     pub active_handle: Option<Handle>,
     /// Last known cursor position, used to hit-test handles on mouse-down.
@@ -127,6 +134,8 @@ impl Default for SessionState {
             phase: Phase::Idle,
             selection: None,
             drag_anchor: None,
+            move_anchor: None,
+            move_rect: None,
             active_handle: None,
             last_cursor: None,
             ctrl_down: false,
@@ -269,8 +278,44 @@ impl CaptureSession {
         state.selection = Some((monitor, selection::drag_start(pos)));
     }
 
+    /// Whether `pos` (in monitor-local pixels) lies inside this monitor's
+    /// current selection interior. Mirrors the hover hit-test in
+    /// `cursor_for` so the cursor shown and the press routing always agree.
+    pub fn selection_contains(&self, monitor: usize, pos: tiny_skia::Point) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .selection
+            .map(|(mi, sel)| {
+                mi == monitor
+                    && pos.x >= sel.x0
+                    && pos.x <= sel.x1
+                    && pos.y >= sel.y0
+                    && pos.y <= sel.y1
+            })
+            .unwrap_or(false)
+    }
+
+    /// Begin moving the existing selection (`Selected` → `Moving`) when a press
+    /// lands inside it. Returns `false` (no state change) when there is no
+    /// `Selected` selection on this monitor.
+    pub fn on_move_start(&self, monitor: usize, pos: tiny_skia::Point) -> bool {
+        let mut state = self.state.lock().unwrap();
+        let Some((mi, sel)) = state.selection else {
+            return false;
+        };
+        if mi != monitor || state.phase != Phase::Selected {
+            return false;
+        }
+        state.phase = Phase::Moving;
+        state.move_anchor = Some(pos);
+        state.move_rect = Some(sel);
+        true
+    }
+
     /// Update the selection as the cursor moves: drag-select while `Selecting`,
-    /// or resize the active handle while `Selected`.
+    /// move the whole selection while `Moving`, or resize the active handle
+    /// while `Selected`.
     pub fn on_mouse_move(&self, monitor: usize, pos: tiny_skia::Point) {
         let mut state = self.state.lock().unwrap();
         state.last_cursor = Some(pos);
@@ -294,6 +339,26 @@ impl CaptureSession {
                     state.selection = Some((mi, selection::drag_update(&anchor_rect, pos)));
                 }
             }
+            Phase::Moving => {
+                // Translate the move-start rect by the total cursor delta —
+                // absolute (no per-frame drift), clamped to the owning
+                // monitor's bounds so the selection never leaves the screen.
+                if let (Some(anchor), Some(orig), Some((mi, _))) =
+                    (state.move_anchor, state.move_rect, state.selection)
+                {
+                    let dx = pos.x - anchor.x;
+                    let dy = pos.y - anchor.y;
+                    let bounds = state
+                        .shots
+                        .get(mi)
+                        .map(|(g, _)| (g.width as f32, g.height as f32));
+                    let moved = match bounds {
+                        Some((w, h)) => selection::translate_clamped(&orig, dx, dy, w, h),
+                        None => selection::translate(&orig, dx, dy),
+                    };
+                    state.selection = Some((mi, moved));
+                }
+            }
             Phase::Selected => {
                 if let Some(h) = state.active_handle {
                     if let Some((mi, sel)) = state.selection {
@@ -308,13 +373,15 @@ impl CaptureSession {
         }
     }
 
-    /// End a drag: `Selecting` → `Selected`.
+    /// End a drag: `Selecting`/`Moving` → `Selected`.
     pub fn on_mouse_up(&self) {
         let mut state = self.state.lock().unwrap();
-        if state.phase == Phase::Selecting {
+        if state.phase == Phase::Selecting || state.phase == Phase::Moving {
             state.phase = Phase::Selected;
         }
         state.drag_anchor = None;
+        state.move_anchor = None;
+        state.move_rect = None;
     }
 
     /// Set (or clear) the handle being dragged.
@@ -443,6 +510,8 @@ impl CaptureSession {
         state.phase = Phase::Idle;
         state.selection = None;
         state.drag_anchor = None;
+        state.move_anchor = None;
+        state.move_rect = None;
         state.active_handle = None;
         state.last_cursor = None;
         state.pending_annotation = None;
@@ -612,6 +681,111 @@ mod tests {
         session.on_mouse_move(0, tiny_skia::Point::from_xy(150.0, 150.0));
         let (_, sel) = session.selection().unwrap();
         assert_eq!(sel, SelectionRect { x0: 10.0, y0: 10.0, x1: 150.0, y1: 150.0 });
+    }
+
+    #[test]
+    fn selection_contains_hit_tests_interior_only() {
+        let session = CaptureSession::new();
+        assert!(
+            !session.selection_contains(0, tiny_skia::Point::from_xy(50.0, 50.0)),
+            "no selection yet"
+        );
+
+        session.on_mouse_down(0, tiny_skia::Point::from_xy(10.0, 10.0));
+        session.on_mouse_move(0, tiny_skia::Point::from_xy(100.0, 100.0));
+        session.on_mouse_up();
+
+        assert!(
+            session.selection_contains(0, tiny_skia::Point::from_xy(50.0, 50.0)),
+            "interior hit"
+        );
+        assert!(
+            session.selection_contains(0, tiny_skia::Point::from_xy(10.0, 10.0)),
+            "edge is inside"
+        );
+        assert!(
+            !session.selection_contains(0, tiny_skia::Point::from_xy(5.0, 50.0)),
+            "outside misses"
+        );
+        assert!(
+            !session.selection_contains(1, tiny_skia::Point::from_xy(50.0, 50.0)),
+            "wrong monitor misses"
+        );
+    }
+
+    #[test]
+    fn move_start_requires_selected_selection_on_monitor() {
+        let session = CaptureSession::new();
+        // No selection yet: move start rejected.
+        assert!(!session.on_move_start(0, tiny_skia::Point::from_xy(50.0, 50.0)));
+        assert_eq!(session.phase(), Phase::Idle);
+
+        session.on_mouse_down(0, tiny_skia::Point::from_xy(10.0, 10.0));
+        session.on_mouse_move(0, tiny_skia::Point::from_xy(100.0, 100.0));
+        session.on_mouse_up();
+        assert_eq!(session.phase(), Phase::Selected);
+
+        // Inside the selection: move accepted.
+        assert!(session.on_move_start(0, tiny_skia::Point::from_xy(50.0, 50.0)));
+        assert_eq!(session.phase(), Phase::Moving);
+
+        // A second move start while Moving must not re-anchor.
+        assert!(
+            !session.on_move_start(0, tiny_skia::Point::from_xy(5.0, 5.0)),
+            "already moving"
+        );
+    }
+
+    #[test]
+    fn move_drag_translates_selection_and_clamps_to_monitor() {
+        let session = CaptureSession::new();
+        // Owning monitor is 200×200 physical px (used for clamping).
+        session.store_shots(vec![(
+            MonitorGeom {
+                x: 0,
+                y: 0,
+                width: 200,
+                height: 200,
+            },
+            xcap::image::RgbaImage::new(200, 200),
+        )]);
+
+        session.on_mouse_down(0, tiny_skia::Point::from_xy(10.0, 10.0));
+        session.on_mouse_move(0, tiny_skia::Point::from_xy(100.0, 80.0));
+        session.on_mouse_up();
+        assert!(session.on_move_start(0, tiny_skia::Point::from_xy(50.0, 40.0)));
+
+        // Drag +30, +20: the whole selection translates, size preserved.
+        session.on_mouse_move(0, tiny_skia::Point::from_xy(80.0, 60.0));
+        let (_, sel) = session.selection().unwrap();
+        assert_eq!(sel, SelectionRect { x0: 40.0, y0: 30.0, x1: 130.0, y1: 100.0 });
+
+        // Drag far past the edges: clamped so the selection stays on-screen.
+        session.on_mouse_move(0, tiny_skia::Point::from_xy(500.0, 500.0));
+        let (_, sel) = session.selection().unwrap();
+        assert_eq!(sel, SelectionRect { x0: 110.0, y0: 130.0, x1: 200.0, y1: 200.0 });
+
+        // Release returns to Selected and keeps the moved rect.
+        session.on_mouse_up();
+        assert_eq!(session.phase(), Phase::Selected);
+        let (_, sel) = session.selection().unwrap();
+        assert_eq!(sel, SelectionRect { x0: 110.0, y0: 130.0, x1: 200.0, y1: 200.0 });
+    }
+
+    #[test]
+    fn finish_resets_move_state() {
+        let session = CaptureSession::new();
+        session.on_mouse_down(0, tiny_skia::Point::from_xy(10.0, 10.0));
+        session.on_mouse_move(0, tiny_skia::Point::from_xy(100.0, 100.0));
+        session.on_mouse_up();
+        session.on_move_start(0, tiny_skia::Point::from_xy(50.0, 50.0));
+
+        session.finish();
+        let state = session.state();
+        let state = state.lock().unwrap();
+        assert_eq!(state.phase, Phase::Idle);
+        assert!(state.move_anchor.is_none());
+        assert!(state.move_rect.is_none());
     }
 
     #[test]

@@ -276,8 +276,10 @@ fn cursor_for(
     if let Some(h) = selection::hit_test_handle(&sel, pos, HANDLE_SIZE) {
         return handle_cursor(h);
     }
-    let inside = pos.x >= sel.x0 && pos.x <= sel.x1 && pos.y >= sel.y0 && pos.y <= sel.y1;
-    if inside {
+    // Move cursor inside the selection for the Select tool (press + drag moves
+    // the selection). Other tools annotate anywhere, so their interior cursor
+    // matches the outside.
+    if session.selection_contains(monitor_index, pos) && session.current_tool() == Tool::Select {
         CursorIcon::Move
     } else {
         CursorIcon::Crosshair
@@ -346,8 +348,9 @@ fn handle_overlay_event(
                 }
 
                 // If the cursor is over a handle of this monitor's selection,
-                // resize it; otherwise start a fresh drag selection (D-02), or
-                // begin an annotation for the active tool (D-03).
+                // resize it; otherwise, for the Select tool, a press inside the
+                // selection moves it and a press elsewhere starts a fresh drag
+                // selection (D-02); other tools begin an annotation (D-03).
                 let over_handle = session
                     .selection()
                     .filter(|(mi, _)| *mi == monitor_index)
@@ -356,7 +359,15 @@ fn handle_overlay_event(
                     session.set_active_handle(Some(h));
                 } else {
                     match session.current_tool() {
-                        Tool::Select => session.on_mouse_down(monitor_index, pos),
+                        Tool::Select => {
+                            if session.selection_contains(monitor_index, pos)
+                                && session.on_move_start(monitor_index, pos)
+                            {
+                                // Move drag started — handled in on_mouse_move.
+                            } else {
+                                session.on_mouse_down(monitor_index, pos);
+                            }
+                        }
                         _ => session.on_annotation_start(pos),
                     }
                 }
@@ -543,6 +554,93 @@ mod tests {
             *p = xcap::image::Rgba([r, g, b, 255]);
         }
         img
+    }
+
+    fn p(x: f32, y: f32) -> Point {
+        Point::from_xy(x, y)
+    }
+
+    /// A session with a Selected (10,10)-(100,100) selection on monitor 0.
+    fn session_with_selection() -> CaptureSession {
+        let session = CaptureSession::new();
+        session.on_mouse_down(0, p(10.0, 10.0));
+        session.on_mouse_move(0, p(100.0, 100.0));
+        session.on_mouse_up();
+        session
+    }
+
+    #[test]
+    fn cursor_for_is_move_inside_selection_with_select_tool() {
+        let session = CaptureSession::new();
+        // No selection yet: crosshair everywhere.
+        assert_eq!(
+            cursor_for(&session, 0, 200.0, 200.0, p(50.0, 50.0)),
+            CursorIcon::Crosshair
+        );
+
+        let session = session_with_selection();
+        assert_eq!(
+            cursor_for(&session, 0, 200.0, 200.0, p(50.0, 50.0)),
+            CursorIcon::Move,
+            "inside the selection, Select tool => Move"
+        );
+        assert_eq!(
+            cursor_for(&session, 0, 200.0, 200.0, p(5.0, 90.0)),
+            CursorIcon::Crosshair,
+            "outside the selection (away from handles) => Crosshair"
+        );
+        assert_eq!(
+            cursor_for(&session, 1, 200.0, 200.0, p(50.0, 50.0)),
+            CursorIcon::Crosshair,
+            "other monitor => Crosshair"
+        );
+    }
+
+    #[test]
+    fn cursor_for_annotation_tool_shows_crosshair_inside_selection() {
+        let session = session_with_selection();
+        session.tool_action(ToolAction::Tool(Tool::Rect));
+        // A non-Select tool annotates anywhere, including over the selection,
+        // so the cursor matches: crosshair, not Move.
+        assert_eq!(
+            cursor_for(&session, 0, 200.0, 200.0, p(50.0, 50.0)),
+            CursorIcon::Crosshair
+        );
+    }
+
+    #[test]
+    fn cursor_for_is_resize_over_handle() {
+        let session = session_with_selection();
+        // SE corner handle is centered on (100, 100).
+        assert_eq!(
+            cursor_for(&session, 0, 200.0, 200.0, p(100.0, 100.0)),
+            CursorIcon::SeResize
+        );
+    }
+
+    #[test]
+    fn cursor_for_is_default_over_toolbar() {
+        let session = session_with_selection();
+        // The toolbar sits just below the selection's bottom-left corner; hit
+        // the first button's center for sel (10,10)-(100,100).
+        let buttons = toolbar::layout_buttons(
+            &SelectionRect {
+                x0: 10.0,
+                y0: 10.0,
+                x1: 100.0,
+                y1: 100.0,
+            },
+            200.0,
+            200.0,
+        );
+        let center = p(
+            buttons[0].rect.x() + buttons[0].rect.width() / 2.0,
+            buttons[0].rect.y() + buttons[0].rect.height() / 2.0,
+        );
+        assert_eq!(
+            cursor_for(&session, 0, 200.0, 200.0, center),
+            CursorIcon::Default
+        );
     }
 
     #[test]
