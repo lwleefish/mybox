@@ -179,6 +179,7 @@ mod tests {
                 assert_eq!(spec.inner_size, Some((400, 300)));
             }
             Some(mybox_core::WindowRequest::Destroy(_)) => panic!("expected Create, got Destroy"),
+            Some(mybox_core::WindowRequest::Redraw(_)) => panic!("expected Create, got Redraw"),
             None => panic!("no request queued"),
         }
         assert_eq!(
