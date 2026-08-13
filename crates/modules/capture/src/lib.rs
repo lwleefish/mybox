@@ -8,6 +8,7 @@
 
 pub mod annotate;
 pub mod capture;
+pub mod clipboard;
 pub mod overlay;
 pub mod permission;
 pub mod selection;
@@ -78,6 +79,9 @@ impl Module for CaptureModule {
 
     fn init(&self, ctx: &ModuleContext) -> anyhow::Result<()> {
         let session = Arc::new(CaptureSession::new());
+        // The confirm flow emits `capture/screenshot-taken` from the overlay
+        // `on_event` closure; give the session the shared bus to publish onto.
+        session.set_bus(Arc::clone(ctx.bus()));
 
         // Hotkey entry: core/hotkey.triggered with action "start_screenshot".
         let hotkey_session = Arc::clone(&session);

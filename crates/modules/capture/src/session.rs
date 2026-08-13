@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use mybox_core::log;
 use mybox_core::tiny_skia;
-use mybox_core::WindowId;
+use mybox_core::{Event, EventBus, WindowId};
 
 use crate::annotate::AnnotationList;
 use crate::capture::MonitorGeom;
@@ -32,6 +32,17 @@ pub struct SelectionRect {
     pub y0: f32,
     pub x1: f32,
     pub y1: f32,
+}
+
+/// Snapshot of everything needed to copy a confirmed selection to the
+/// clipboard: the owning monitor index, the selection rect, that monitor's
+/// captured image, and the retained annotations. Cloned out of the shared state
+/// so the clipboard path runs without holding the session lock.
+pub struct ConfirmSnapshot {
+    pub monitor_index: usize,
+    pub rect: SelectionRect,
+    pub shot: xcap::image::RgbaImage,
+    pub annotations: Vec<Annotation>,
 }
 
 /// Active annotation tool (unified mode, D-03 — no explicit mode switch).
@@ -130,6 +141,9 @@ impl Default for SessionState {
 #[derive(Clone)]
 pub struct CaptureSession {
     state: Arc<std::sync::Mutex<SessionState>>,
+    /// The event bus, injected once at module init so the confirm flow can emit
+    /// `capture/screenshot-taken` from the main-thread overlay closure.
+    bus: Arc<std::sync::OnceLock<Arc<EventBus>>>,
 }
 
 impl CaptureSession {
@@ -137,6 +151,20 @@ impl CaptureSession {
     pub fn new() -> Self {
         Self {
             state: Arc::new(std::sync::Mutex::new(SessionState::default())),
+            bus: Arc::new(std::sync::OnceLock::new()),
+        }
+    }
+
+    /// Inject the shared event bus (called once during module `init`).
+    pub fn set_bus(&self, bus: Arc<EventBus>) {
+        let _ = self.bus.set(bus);
+    }
+
+    /// Publish an event onto the shared bus (no-op before `set_bus` — e.g. in
+    /// headless tests).
+    pub fn emit(&self, event: Event) {
+        if let Some(bus) = self.bus.get() {
+            bus.emit(event);
         }
     }
 
@@ -330,17 +358,50 @@ impl CaptureSession {
         }
     }
 
-    /// Cancel the whole capture (ESC, D-04): reset to `Idle`, clear the
-    /// selection, and hand back the overlay window ids to destroy. Idempotent —
-    /// `overlay_ids` is drained, so a repeated ESC destroys nothing (T-2-06).
-    pub fn cancel(&self) -> Vec<WindowId> {
+    /// Snapshot the current selection (monitor index + rect), that monitor's
+    /// capture, and the retained annotations for clipboard copy — without
+    /// mutating the shared state. Pure and idempotent: a failed copy can be
+    /// retried by calling `confirm()` again.
+    ///
+    /// Returns `None` when there is no selection yet or the selected monitor has
+    /// no capture (T-2-15 guard — never enter the clipboard path on empty state).
+    pub fn confirm(&self) -> Option<ConfirmSnapshot> {
+        let state = self.state.lock().unwrap();
+        let (monitor_index, rect) = state.selection?;
+        let shot = state.shots.get(monitor_index)?.1.clone();
+        let annotations = state.annotations.items.clone();
+        Some(ConfirmSnapshot {
+            monitor_index,
+            rect,
+            shot,
+            annotations,
+        })
+    }
+
+    /// Tear down the whole session and hand back the overlay window ids to
+    /// destroy (drop-before-close, T-2-01: the sensitive captured pixels must
+    /// not outlive the session). Clears `shots`, the selection, annotations,
+    /// pending annotation, and overlay bookkeeping; idempotent (a second call
+    /// returns an empty id list).
+    pub fn finish(&self) -> Vec<WindowId> {
         let mut state = self.state.lock().unwrap();
+        state.shots.clear();
         state.phase = Phase::Idle;
         state.selection = None;
         state.drag_anchor = None;
         state.active_handle = None;
         state.last_cursor = None;
+        state.pending_annotation = None;
+        state.annotations = AnnotationList::default();
+        state.pending_overlays = 0;
         std::mem::take(&mut state.overlay_ids)
+    }
+
+    /// Cancel the whole capture (ESC, D-04): full session teardown and hand back
+    /// the overlay window ids to destroy. Idempotent — `overlay_ids` is drained,
+    /// so a repeated ESC destroys nothing (T-2-06).
+    pub fn cancel(&self) -> Vec<WindowId> {
+        self.finish()
     }
 }
 
@@ -546,5 +607,85 @@ mod tests {
             }
         );
         assert!(state.pending_annotation.is_none(), "text never enters the pending slot");
+    }
+
+    #[test]
+    fn confirm_returns_snapshot_and_is_idempotent() {
+        let session = CaptureSession::new();
+        let shot = (
+            MonitorGeom {
+                x: 0,
+                y: 0,
+                width: 4,
+                height: 4,
+            },
+            xcap::image::RgbaImage::new(4, 4),
+        );
+        session.store_shots(vec![shot]);
+        session.on_mouse_down(0, tiny_skia::Point::from_xy(1.0, 1.0));
+        session.on_mouse_move(0, tiny_skia::Point::from_xy(3.0, 3.0));
+        session.on_mouse_up();
+
+        let snap = session.confirm().expect("selection + shot must confirm");
+        assert_eq!(snap.monitor_index, 0);
+        assert_eq!(
+            snap.rect,
+            SelectionRect { x0: 1.0, y0: 1.0, x1: 3.0, y1: 3.0 }
+        );
+        assert_eq!((snap.shot.width(), snap.shot.height()), (4, 4));
+
+        // Pure: a second confirm returns the same snapshot and leaves the state
+        // intact (so a failed clipboard copy can be retried).
+        let snap2 = session.confirm().expect("confirm is idempotent");
+        assert_eq!(snap2.rect, snap.rect);
+        assert_eq!(session.phase(), Phase::Selected);
+        assert!(session.selection().is_some());
+    }
+
+    #[test]
+    fn confirm_returns_none_without_selection_or_shot() {
+        let session = CaptureSession::new();
+        assert!(session.confirm().is_none(), "no selection => None");
+
+        // Selection exists but the monitor has no capture (T-2-15 guard).
+        session.on_mouse_down(0, tiny_skia::Point::from_xy(1.0, 1.0));
+        session.on_mouse_move(0, tiny_skia::Point::from_xy(3.0, 3.0));
+        session.on_mouse_up();
+        assert!(session.confirm().is_none(), "selection with no shot => None");
+    }
+
+    #[test]
+    fn finish_clears_shots_annotations_and_returns_overlay_ids() {
+        let session = CaptureSession::new();
+        let shot = (
+            MonitorGeom {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            xcap::image::RgbaImage::new(2, 2),
+        );
+        session.store_shots(vec![shot]);
+        session.tool_action(ToolAction::Tool(Tool::Rect));
+        session.on_annotation_start(tiny_skia::Point::from_xy(0.0, 0.0));
+        session.on_annotation_update(tiny_skia::Point::from_xy(1.0, 1.0));
+        session.on_annotation_finish();
+        {
+            let state_arc = session.state();
+            let mut state = state_arc.lock().unwrap();
+            state.overlay_ids = vec![1, 2];
+        }
+
+        let ids = session.finish();
+        assert_eq!(ids, vec![1, 2], "finish returns the overlay ids to destroy");
+
+        let state_arc = session.state();
+        let state = state_arc.lock().unwrap();
+        assert!(state.shots.is_empty(), "shots cleared (T-2-01 drop-before-close)");
+        assert!(state.annotations.is_empty(), "annotations cleared");
+        assert_eq!(state.phase, Phase::Idle);
+        assert!(state.overlay_ids.is_empty());
+        assert_eq!(state.pending_overlays, 0);
     }
 }

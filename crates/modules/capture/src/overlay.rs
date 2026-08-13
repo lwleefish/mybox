@@ -15,11 +15,13 @@ use mybox_core::tiny_skia::{
 use mybox_core::window::{WindowKind, WindowManagerHandle, WindowSpec};
 use mybox_core::winit::event::{ElementState, MouseButton, WindowEvent};
 use mybox_core::winit::keyboard::{Key, NamedKey};
+use mybox_core::{log, Event, EventPayload};
 
+use crate::clipboard;
 use crate::selection;
 use crate::session::{CaptureSession, SelectionRect, Tool};
 use crate::text;
-use crate::toolbar;
+use crate::toolbar::{self, ToolAction};
 
 /// Dimming-mask opacity (CAP-02: semi-transparent black over the un-selected
 /// area).
@@ -236,8 +238,16 @@ fn handle_overlay_event(
                     .map(|(_, sel)| toolbar::layout_buttons((sel.x0, sel.y1), screen_w))
                     .and_then(|buttons| toolbar::hit_test(&buttons, pos));
                 if let Some(action) = toolbar_action {
-                    session.tool_action(action);
-                    redraw_all_overlays(session, windows);
+                    match action {
+                        // Confirm/Cancel are wired to the full teardown flow
+                        // (clipboard copy + destroy overlays, or full cancel).
+                        ToolAction::Confirm => confirm_and_copy(session, windows),
+                        ToolAction::Cancel => cancel_overlays(session, windows),
+                        _ => {
+                            session.tool_action(action);
+                            redraw_all_overlays(session, windows);
+                        }
+                    }
                     return;
                 }
 
@@ -280,11 +290,12 @@ fn handle_overlay_event(
             }
             if event.logical_key == Key::Named(NamedKey::Escape) {
                 // ESC cancels everything (CAP-05, D-04): destroy all overlays,
-                // copy nothing. `cancel` is idempotent (T-2-06).
-                let ids = session.cancel();
-                for id in ids {
-                    windows.destroy(id);
-                }
+                // copy nothing (idempotent, T-2-06).
+                cancel_overlays(session, windows);
+            } else if event.logical_key == Key::Named(NamedKey::Enter) {
+                // Enter confirms: crop + bake + copy to clipboard, then close
+                // every overlay (CAP-04, D-01, D-04).
+                confirm_and_copy(session, windows);
             } else if event.logical_key == "z" && session.ctrl_down() {
                 // Ctrl+Z (Cmd+Z on macOS) undoes the last annotation (CAP-07).
                 session.undo();
@@ -303,6 +314,68 @@ fn redraw_all_overlays(session: &CaptureSession, windows: &WindowManagerHandle) 
     for id in state.overlay_ids.iter() {
         windows.redraw(*id);
     }
+}
+
+/// ESC / toolbar-cancel teardown (CAP-05, D-04): full session reset (which also
+/// drops the captured pixels — T-2-01) and destroy every overlay window. Copies
+/// nothing.
+fn cancel_overlays(session: &CaptureSession, windows: &WindowManagerHandle) {
+    let ids = session.cancel();
+    for id in ids {
+        windows.destroy(id);
+    }
+}
+
+/// Enter / toolbar-confirm flow (CAP-04, D-01, D-04): crop the selection, bake
+/// the retained annotations, write to the clipboard on the main thread (this
+/// runs from `on_event`, which satisfies the clipboard thread-affinity), then
+/// destroy all overlays and clear the session. On any clipboard error the
+/// overlays stay open for a retry (T-2-12).
+fn confirm_and_copy(session: &CaptureSession, windows: &WindowManagerHandle) {
+    let Some(snapshot) = session.confirm() else {
+        return; // no selection or no capture — nothing to copy (T-2-15)
+    };
+    let img = &snapshot.shot;
+    let rect = snapshot.rect;
+    let (iw, ih) = (img.width(), img.height());
+
+    let x0 = rect.x0.round().clamp(0.0, iw as f32) as u32;
+    let y0 = rect.y0.round().clamp(0.0, ih as f32) as u32;
+    let x1 = rect.x1.round().clamp(0.0, iw as f32) as u32;
+    let y1 = rect.y1.round().clamp(0.0, ih as f32) as u32;
+    if x1 <= x0 || y1 <= y0 {
+        log::error!("capture: empty selection — not copying (T-2-15)");
+        return;
+    }
+    let w = x1 - x0;
+    let h = y1 - y0;
+
+    let cropped = clipboard::crop_image(img, x0, y0, w, h);
+    let baked = clipboard::bake_annotations(
+        &cropped,
+        w,
+        h,
+        &snapshot.annotations,
+        Point::from_xy(x0 as f32, y0 as f32),
+    );
+
+    if let Err(e) = clipboard::copy_to_clipboard(&baked, w as usize, h as usize) {
+        log::error!("capture: clipboard copy failed — overlays stay open: {e:#}");
+        return;
+    }
+
+    // Success: destroy every overlay, clear the session (drop-before-close,
+    // T-2-01), and notify the bus.
+    let ids = session.finish();
+    for id in ids {
+        windows.destroy(id);
+    }
+    session.emit(Event {
+        from: "capture",
+        kind: "screenshot-taken",
+        payload: EventPayload::Module(serde_json::json!({})),
+    });
+    log::info!("capture: selection copied to clipboard; overlays closed");
 }
 
 /// Draw the selection chrome: white border, 8 handles, and the WxH size label

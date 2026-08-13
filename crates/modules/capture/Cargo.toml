@@ -9,9 +9,7 @@ mybox-core = { path = "../../mybox-core" }
 xcap.workspace = true
 arboard.workspace = true
 ab_glyph.workspace = true
+serde_json.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-core-graphics = "0.3.2"
-
-[dev-dependencies]
-serde_json.workspace = true

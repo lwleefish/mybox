@@ -50,6 +50,13 @@ impl ModuleContext {
         self.bus.emit(event);
     }
 
+    /// Access the shared event bus (added so feature modules can emit events
+    /// from their own `'static` callbacks — e.g. the capture module's overlay
+    /// `on_event` emits `capture/screenshot-taken` at confirm time).
+    pub fn bus(&self) -> &Arc<EventBus> {
+        &self.bus
+    }
+
     /// Subscribe with a filter; returns a unique [`SubscriptionId`].
     pub fn on(
         &self,
