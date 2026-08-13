@@ -7,5 +7,6 @@ description = "mybox application entry point: assembles framework + modules and 
 [dependencies]
 mybox-core = { path = "../mybox-core" }
 mybox-test = { path = "../modules/test" }
+mybox-capture = { path = "../modules/capture" }
 anyhow = { workspace = true }
 env_logger = { workspace = true }

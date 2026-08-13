@@ -12,5 +12,6 @@ fn main() -> anyhow::Result<()> {
     let mut builder = App::builder();
     // module() returns Result — a duplicate module id bubbles up here (N1).
     builder.module(Box::new(mybox_test::TestModule))?;
+    builder.module(Box::new(mybox_capture::CaptureModule::new()))?;
     builder.build()?.run()
 }
