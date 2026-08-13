@@ -65,13 +65,24 @@ Plans:
   5. 用户按 Ctrl+Z 撤销标注，按 ESC 取消截图
   6. macOS 首次截图时提示用户授予屏幕录制权限
 
-**Plans**: TBD
+**Plans**: 4 plans
 
 Plans:
+**Wave 1** *(deps gate + core render chain + capture backend)*
 
-- [ ] 02-01: 屏幕捕获 + 覆盖窗口 + 区域选择交互
-- [ ] 02-02: 标注工具（矩形、箭头、画笔、文字）+ 撤销
-- [ ] 02-03: 剪贴板复制 + macOS 权限引导 + 截图流程串联
+- [ ] 02-01: 依赖验证（xcap/arboard/ab_glyph 门禁）+ 框架渲染链路（on_draw/Redraw/batch_create 处置）+ 捕获后端（xcap 全屏捕获 + 权限预检 + SessionState）
+
+**Wave 2** *(blocked on Wave 1)*
+
+- [ ] 02-02: 覆盖窗口显示（每屏一窗 + 画面/遮罩合成）+ 区域选择交互（拖拽/8 手柄/WxH 标签/ESC 取消）
+
+**Wave 3** *(blocked on Wave 2)*
+
+- [ ] 02-03: 标注工具（矩形/箭头/画笔/文字）+ 统一工具栏 + Ctrl+Z 撤销
+
+**Wave 4** *(blocked on Wave 3)*
+
+- [ ] 02-04: 剪贴板复制（含标注）+ macOS 权限引导 + 确认流程串联 + 端到端测试
 
 ### Phase 3: 命令面板
 
@@ -122,6 +133,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. 框架核心 | 4/4 | Complete   | 2026-08-12 |
-| 2. 截图模块 | 0/3 | Not started | - |
+| 2. 截图模块 | 0/4 | Not started | - |
 | 3. 命令面板 | 0/2 | Not started | - |
 | 4. 跨平台完善 | 0/2 | Not started | - |
