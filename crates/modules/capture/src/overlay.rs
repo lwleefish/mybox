@@ -46,6 +46,19 @@ pub fn premultiply_rgba8(rgba: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Convert a straight-alpha capture into a premultiplied, draw-ready [`Pixmap`].
+///
+/// Perf-critical: this runs ONCE per capture (in [`create_overlays`]) and the
+/// result is moved into the overlay's `on_draw` closure. The per-frame draw path
+/// must only blit the cached pixmap — never re-premultiply a full-resolution
+/// image every frame (the previous `blit_shot` did exactly that and made
+/// selection drags and annotation input unusably laggy).
+pub fn premultiply_pixmap(shot: &xcap::image::RgbaImage) -> Pixmap {
+    let premul = premultiply_rgba8(shot.as_raw());
+    let size = IntSize::from_wh(shot.width(), shot.height()).expect("capture has non-zero dims");
+    Pixmap::from_vec(premul, size).expect("premultiplied bytes must form a valid pixmap")
+}
+
 /// Create one overlay window per captured monitor (RESEARCH Pattern 3, D-09).
 ///
 /// Each `WindowSpec` is an `Overlay` placed at the monitor's physical-pixel
@@ -57,19 +70,23 @@ pub fn premultiply_rgba8(rgba: &[u8]) -> Vec<u8> {
 /// `core/window-created` event can pair framework window ids with overlays
 /// (CAP-05 teardown).
 pub fn create_overlays(session: &CaptureSession, windows: &Arc<WindowManagerHandle>) {
-    // Collect geometry under the lock, then create without holding it.
-    let geoms: Vec<(i32, i32, u32, u32)> = {
+    // Precompute each monitor's premultiplied, draw-ready pixmap ONCE under the
+    // lock (perf: the `on_draw` closure must only blit the cached pixmap every
+    // frame, never re-premultiply the full-resolution capture per frame). Window
+    // enqueuing still happens outside the lock.
+    let frames: Vec<((i32, i32, u32, u32), Pixmap)> = {
         let state = session.state();
         let state = state.lock().unwrap();
         state
             .shots
             .iter()
-            .map(|(g, _)| (g.x, g.y, g.width, g.height))
+            .map(|(g, img)| ((g.x, g.y, g.width, g.height), premultiply_pixmap(img)))
             .collect()
     };
 
-    for (monitor_index, (x, y, width, height)) in geoms.iter().enumerate() {
-        let (x, y, width, height) = (*x, *y, *width, *height);
+    let pending = frames.len();
+
+    for (monitor_index, ((x, y, width, height), frame)) in frames.into_iter().enumerate() {
         let windows_handle = Arc::clone(windows);
         let event_windows = Arc::clone(&windows_handle);
         let session_event = session.clone();
@@ -90,7 +107,7 @@ pub fn create_overlays(session: &CaptureSession, windows: &Arc<WindowManagerHand
                 );
             })),
             on_draw: Some(Box::new(move |pm, w, h| {
-                draw_overlay(pm, w, h, &session_draw, monitor_index);
+                draw_overlay(pm, w, h, &session_draw, monitor_index, &frame);
             })),
             ..Default::default()
         };
@@ -100,32 +117,28 @@ pub fn create_overlays(session: &CaptureSession, windows: &Arc<WindowManagerHand
     {
         let state = session.state();
         let mut state = state.lock().unwrap();
-        state.pending_overlays = geoms.len();
+        state.pending_overlays = pending;
     }
 }
 
-/// The `on_draw` entry: re-composite one monitor's full frame from shared state.
+/// The `on_draw` entry: re-composite one monitor's full frame from shared state,
+/// blitting the cached premultiplied capture (built once in `create_overlays`).
 fn draw_overlay(
     pm: &mut PixmapMut,
     w: u32,
     h: u32,
     session: &CaptureSession,
     monitor_index: usize,
+    frame: &Pixmap,
 ) {
     let state = session.state();
     let state = state.lock().unwrap();
-    // T-2-05 guard: a stale index or empty shot set must not panic the draw
-    // loop (draw closures are already catch_unwind-wrapped by the core).
-    if monitor_index >= state.shots.len() {
-        return;
-    }
-    let shot = &state.shots[monitor_index].1;
     let selection = state
         .selection
         .as_ref()
         .filter(|(mi, _)| *mi == monitor_index)
         .map(|(_, rect)| *rect);
-    composite_frame(pm, w, h, shot, selection.as_ref());
+    composite_frame(pm, w, h, frame, selection.as_ref());
 
     // Selection chrome + annotations + toolbar only on the monitor that owns it.
     if let Some(sel) = selection {
@@ -148,17 +161,26 @@ fn draw_overlay(
     }
 }
 
-/// Composite one frame: blit the capture, then dim everything outside the
+/// Composite one frame: blit the cached capture, then dim everything outside the
 /// selection (or the whole screen when there is none). The selection interior
 /// keeps the original image (CAP-02).
 fn composite_frame(
     pm: &mut PixmapMut,
     w: u32,
     h: u32,
-    shot: &xcap::image::RgbaImage,
+    frame: &Pixmap,
     selection: Option<&SelectionRect>,
 ) {
-    blit_shot(pm, shot);
+    // Blit the cached premultiplied capture (already converted once in
+    // `create_overlays` — never re-convert per frame).
+    pm.draw_pixmap(
+        0,
+        0,
+        frame.as_ref(),
+        &PixmapPaint::default(),
+        Transform::identity(),
+        None,
+    );
 
     let mut mask = Paint::default();
     mask.set_color_rgba8(0, 0, 0, MASK_ALPHA);
@@ -169,23 +191,6 @@ fn composite_frame(
             pm.fill_rect(full, &mask, Transform::identity(), None);
         }
         Some(sel) => draw_mask_outside(pm, w as f32, h as f32, sel, &mask),
-    }
-}
-
-/// Blit the (straight-alpha) capture into the pixmap, premultiplied.
-fn blit_shot(pm: &mut PixmapMut, shot: &xcap::image::RgbaImage) {
-    let (w, h) = (shot.width(), shot.height());
-    let premul = premultiply_rgba8(shot.as_raw());
-    let size = IntSize::from_wh(w, h).expect("capture has non-zero dims");
-    if let Some(pixmap) = Pixmap::from_vec(premul, size) {
-        pm.draw_pixmap(
-            0,
-            0,
-            pixmap.as_ref(),
-            &PixmapPaint::default(),
-            Transform::identity(),
-            None,
-        );
     }
 }
 
@@ -465,9 +470,10 @@ mod tests {
     fn no_selection_masks_entire_frame() {
         let mut pixmap = Pixmap::new(4, 4).expect("4x4 pixmap");
         let shot = sample_shot(255, 255, 255);
+        let frame = premultiply_pixmap(&shot);
         {
             let mut pm = pixmap.as_mut();
-            composite_frame(&mut pm, 4, 4, &shot, None);
+            composite_frame(&mut pm, 4, 4, &frame, None);
         }
         let d = pixmap.data();
         // White dimmed by ~50% black → roughly 128, and the frame stays opaque.
@@ -479,6 +485,7 @@ mod tests {
     fn selection_interior_keeps_original_pixel() {
         let mut pixmap = Pixmap::new(4, 4).expect("4x4 pixmap");
         let shot = sample_shot(255, 255, 255);
+        let frame = premultiply_pixmap(&shot);
         let sel = SelectionRect {
             x0: 1.0,
             y0: 1.0,
@@ -487,7 +494,7 @@ mod tests {
         };
         {
             let mut pm = pixmap.as_mut();
-            composite_frame(&mut pm, 4, 4, &shot, Some(&sel));
+            composite_frame(&mut pm, 4, 4, &frame, Some(&sel));
         }
         let d = pixmap.data();
         let center = ((2 * 4 + 2) * 4) as usize; // (2,2) inside selection
