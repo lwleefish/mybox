@@ -9,8 +9,7 @@
 use std::sync::Arc;
 
 use mybox_core::tiny_skia::{
-    Color, IntSize, Paint, PathBuilder, Pixmap, PixmapMut, PixmapPaint, Point, Rect, Stroke,
-    Transform,
+    Color, IntSize, Paint, PathBuilder, Pixmap, PixmapMut, Point, Rect, Stroke, Transform,
 };
 use mybox_core::window::{WindowKind, WindowManagerHandle, WindowSpec};
 use mybox_core::winit::event::{ElementState, MouseButton, WindowEvent};
@@ -59,6 +58,30 @@ pub fn premultiply_pixmap(shot: &xcap::image::RgbaImage) -> Pixmap {
     Pixmap::from_vec(premul, size).expect("premultiplied bytes must form a valid pixmap")
 }
 
+/// Premultiply a capture AND bake the full-screen dimming mask in a single pass,
+/// producing the "everything dimmed" base layer. Built once per capture (in
+/// [`create_overlays`]) so the per-frame draw path never blends a full-screen
+/// semi-transparent mask (the previous dominant per-frame cost).
+///
+/// Semantically equivalent to `premultiply_pixmap` followed by a full-screen
+/// `fill_rect` of `(0,0,0,MASK_ALPHA)`: each premultiplied channel is scaled by
+/// `(255 - MASK_ALPHA) / 255`.
+pub fn premultiply_dimmed_pixmap(shot: &xcap::image::RgbaImage) -> Pixmap {
+    let raw = shot.as_raw();
+    let dim = u32::from(255 - MASK_ALPHA);
+    let mut out = Vec::with_capacity(raw.len());
+    for px in raw.chunks_exact(4) {
+        let (r, g, b, a) = (px[0], px[1], px[2], px[3]);
+        let a = u32::from(a);
+        out.push(((u32::from(r) * a * dim) / (255 * 255)) as u8);
+        out.push(((u32::from(g) * a * dim) / (255 * 255)) as u8);
+        out.push(((u32::from(b) * a * dim) / (255 * 255)) as u8);
+        out.push(a as u8);
+    }
+    let size = IntSize::from_wh(shot.width(), shot.height()).expect("capture has non-zero dims");
+    Pixmap::from_vec(out, size).expect("premultiplied bytes must form a valid pixmap")
+}
+
 /// Create one overlay window per captured monitor (RESEARCH Pattern 3, D-09).
 ///
 /// Each `WindowSpec` is an `Overlay` placed at the monitor's physical-pixel
@@ -70,23 +93,29 @@ pub fn premultiply_pixmap(shot: &xcap::image::RgbaImage) -> Pixmap {
 /// `core/window-created` event can pair framework window ids with overlays
 /// (CAP-05 teardown).
 pub fn create_overlays(session: &CaptureSession, windows: &Arc<WindowManagerHandle>) {
-    // Precompute each monitor's premultiplied, draw-ready pixmap ONCE under the
-    // lock (perf: the `on_draw` closure must only blit the cached pixmap every
-    // frame, never re-premultiply the full-resolution capture per frame). Window
-    // enqueuing still happens outside the lock.
-    let frames: Vec<((i32, i32, u32, u32), Pixmap)> = {
+    // Precompute each monitor's premultiplied draw-ready layers ONCE under the
+    // lock (perf: the `on_draw` closure must only blit cached bytes every frame,
+    // never re-premultiply or re-blend the full-resolution capture per frame).
+    // Window enqueuing still happens outside the lock.
+    let frames: Vec<((i32, i32, u32, u32), Pixmap, Pixmap)> = {
         let state = session.state();
         let state = state.lock().unwrap();
         state
             .shots
             .iter()
-            .map(|(g, img)| ((g.x, g.y, g.width, g.height), premultiply_pixmap(img)))
+            .map(|(g, img)| {
+                (
+                    (g.x, g.y, g.width, g.height),
+                    premultiply_pixmap(img),
+                    premultiply_dimmed_pixmap(img),
+                )
+            })
             .collect()
     };
 
     let pending = frames.len();
 
-    for (monitor_index, ((x, y, width, height), frame)) in frames.into_iter().enumerate() {
+    for (monitor_index, ((x, y, width, height), frame, dimmed)) in frames.into_iter().enumerate() {
         let windows_handle = Arc::clone(windows);
         let event_windows = Arc::clone(&windows_handle);
         let session_event = session.clone();
@@ -97,6 +126,7 @@ pub fn create_overlays(session: &CaptureSession, windows: &Arc<WindowManagerHand
             title: "capture-overlay".to_string(),
             inner_size: Some((width, height)),
             position: Some((x, y)),
+            cursor_icon: Some(mybox_core::winit::window::CursorIcon::Crosshair),
             on_event: Some(Box::new(move |event| {
                 handle_overlay_event(
                     &session_event,
@@ -107,7 +137,7 @@ pub fn create_overlays(session: &CaptureSession, windows: &Arc<WindowManagerHand
                 );
             })),
             on_draw: Some(Box::new(move |pm, w, h| {
-                draw_overlay(pm, w, h, &session_draw, monitor_index, &frame);
+                draw_overlay(pm, w, h, &session_draw, monitor_index, &frame, &dimmed);
             })),
             ..Default::default()
         };
@@ -122,7 +152,7 @@ pub fn create_overlays(session: &CaptureSession, windows: &Arc<WindowManagerHand
 }
 
 /// The `on_draw` entry: re-composite one monitor's full frame from shared state,
-/// blitting the cached premultiplied capture (built once in `create_overlays`).
+/// blitting the cached premultiplied layers (built once in `create_overlays`).
 fn draw_overlay(
     pm: &mut PixmapMut,
     w: u32,
@@ -130,6 +160,7 @@ fn draw_overlay(
     session: &CaptureSession,
     monitor_index: usize,
     frame: &Pixmap,
+    dimmed: &Pixmap,
 ) {
     let state = session.state();
     let state = state.lock().unwrap();
@@ -138,7 +169,7 @@ fn draw_overlay(
         .as_ref()
         .filter(|(mi, _)| *mi == monitor_index)
         .map(|(_, rect)| *rect);
-    composite_frame(pm, w, h, frame, selection.as_ref());
+    composite_frame(pm, w, h, frame, dimmed, selection.as_ref());
 
     // Selection chrome + annotations + toolbar only on the monitor that owns it.
     if let Some(sel) = selection {
@@ -161,55 +192,41 @@ fn draw_overlay(
     }
 }
 
-/// Composite one frame: blit the cached capture, then dim everything outside the
-/// selection (or the whole screen when there is none). The selection interior
-/// keeps the original image (CAP-02).
+/// Composite one frame: blit the pre-dimmed capture, then restore the selection
+/// interior from the undimmed capture. Both are raw premultiplied RGBA8 buffers
+/// of identical layout, so this uses `copy_from_slice` (memcpy) instead of
+/// tiny-skia's per-pixel pattern fill — the per-frame full-screen blend that
+/// made drag interactions laggy.
 fn composite_frame(
     pm: &mut PixmapMut,
-    w: u32,
-    h: u32,
+    _w: u32,
+    _h: u32,
     frame: &Pixmap,
+    dimmed: &Pixmap,
     selection: Option<&SelectionRect>,
 ) {
-    // Blit the cached premultiplied capture (already converted once in
-    // `create_overlays` — never re-convert per frame).
-    pm.draw_pixmap(
-        0,
-        0,
-        frame.as_ref(),
-        &PixmapPaint::default(),
-        Transform::identity(),
-        None,
-    );
+    let dst = pm.data_mut();
+    let src = dimmed.data();
+    let n = src.len().min(dst.len());
+    dst[..n].copy_from_slice(&src[..n]);
 
-    let mut mask = Paint::default();
-    mask.set_color_rgba8(0, 0, 0, MASK_ALPHA);
-
-    match selection {
-        None => {
-            let full = Rect::from_xywh(0.0, 0.0, w as f32, h as f32).expect("non-zero overlay");
-            pm.fill_rect(full, &mask, Transform::identity(), None);
+    if let Some(sel) = selection {
+        let fw = frame.width();
+        let fh = frame.height();
+        let x0 = sel.x0.round().clamp(0.0, fw as f32) as u32;
+        let y0 = sel.y0.round().clamp(0.0, fh as f32) as u32;
+        let x1 = sel.x1.round().clamp(0.0, fw as f32) as u32;
+        let y1 = sel.y1.round().clamp(0.0, fh as f32) as u32;
+        if x1 > x0 && y1 > y0 {
+            let orig = frame.data();
+            let stride = fw as usize * 4;
+            let row_len = (x1 - x0) as usize * 4;
+            for row in y0..y1 {
+                let off = row as usize * stride + x0 as usize * 4;
+                dst[off..off + row_len].copy_from_slice(&orig[off..off + row_len]);
+            }
         }
-        Some(sel) => draw_mask_outside(pm, w as f32, h as f32, sel, &mask),
     }
-}
-
-/// Fill a rectangle, skipping zero/negative sizes (T-2-05 guard).
-fn fill_rect_safe(pm: &mut PixmapMut, x: f32, y: f32, w: f32, h: f32, paint: &Paint) {
-    if w <= 0.0 || h <= 0.0 {
-        return;
-    }
-    if let Some(r) = Rect::from_xywh(x, y, w, h) {
-        pm.fill_rect(r, paint, Transform::identity(), None);
-    }
-}
-
-/// Dim the four regions outside the selection (above/below/left/right).
-fn draw_mask_outside(pm: &mut PixmapMut, w: f32, h: f32, sel: &SelectionRect, mask: &Paint) {
-    fill_rect_safe(pm, 0.0, 0.0, w, sel.y0, mask); // above
-    fill_rect_safe(pm, 0.0, sel.y1, w, h - sel.y1, mask); // below
-    fill_rect_safe(pm, 0.0, sel.y0, sel.x0, sel.y1 - sel.y0, mask); // left
-    fill_rect_safe(pm, sel.x1, sel.y0, w - sel.x1, sel.y1 - sel.y0, mask); // right
 }
 
 /// Per-window input routing (CAP-03/05/06/07, D-02/D-03/D-04): drag-select,
@@ -470,10 +487,11 @@ mod tests {
     fn no_selection_masks_entire_frame() {
         let mut pixmap = Pixmap::new(4, 4).expect("4x4 pixmap");
         let shot = sample_shot(255, 255, 255);
+        let dimmed = premultiply_dimmed_pixmap(&shot);
         let frame = premultiply_pixmap(&shot);
         {
             let mut pm = pixmap.as_mut();
-            composite_frame(&mut pm, 4, 4, &frame, None);
+            composite_frame(&mut pm, 4, 4, &frame, &dimmed, None);
         }
         let d = pixmap.data();
         // White dimmed by ~50% black → roughly 128, and the frame stays opaque.
@@ -486,6 +504,7 @@ mod tests {
         let mut pixmap = Pixmap::new(4, 4).expect("4x4 pixmap");
         let shot = sample_shot(255, 255, 255);
         let frame = premultiply_pixmap(&shot);
+        let dimmed = premultiply_dimmed_pixmap(&shot);
         let sel = SelectionRect {
             x0: 1.0,
             y0: 1.0,
@@ -494,7 +513,7 @@ mod tests {
         };
         {
             let mut pm = pixmap.as_mut();
-            composite_frame(&mut pm, 4, 4, &frame, Some(&sel));
+            composite_frame(&mut pm, 4, 4, &frame, &dimmed, Some(&sel));
         }
         let d = pixmap.data();
         let center = ((2 * 4 + 2) * 4) as usize; // (2,2) inside selection

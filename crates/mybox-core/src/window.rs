@@ -37,6 +37,9 @@ pub struct WindowSpec {
     pub inner_size: Option<(u32, u32)>,
     /// Physical pixels.
     pub position: Option<(i32, i32)>,
+    /// Mouse cursor shown while over this window (e.g. `Crosshair` for the
+    /// screenshot overlay). `None` keeps the platform default.
+    pub cursor_icon: Option<winit::window::CursorIcon>,
     /// Per-window event callback (D-07 routing target).
     pub on_event: Option<Box<dyn Fn(&winit::event::WindowEvent) + Send + Sync>>,
     /// Per-window draw callback (Phase 2): receives the tiny-skia pixmap and its
@@ -56,6 +59,7 @@ impl Default for WindowSpec {
             visible: true,
             inner_size: None,
             position: None,
+            cursor_icon: None,
             on_event: None,
             on_draw: None,
         }
@@ -102,6 +106,9 @@ pub fn window_attributes(spec: &WindowSpec) -> winit::window::WindowAttributes {
     }
     if let Some((x, y)) = spec.position {
         attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(x, y));
+    }
+    if let Some(icon) = spec.cursor_icon {
+        attrs = attrs.with_cursor(icon);
     }
     attrs
 }
