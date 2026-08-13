@@ -11,6 +11,11 @@ use mybox_core::WindowId;
 use crate::capture::MonitorGeom;
 
 /// Selection rectangle in the owning monitor's local pixel coordinates.
+///
+/// `Copy`/`Clone`/`Debug`/`PartialEq` so the pure selection logic
+/// (`crate::selection`) and the overlay draw closure can pass it by value and
+/// unit-test it headlessly.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SelectionRect {
     pub x0: f32,
     pub y0: f32,
@@ -79,6 +84,10 @@ impl Default for SessionState {
 /// `std::sync::Mutex` (not `parking_lot`) — `parking_lot` is not re-exported by
 /// `mybox-core` and is not a module-crate dependency (FRMW-02); the module-crate
 /// precedent (`crates/modules/test`) shares state with `std::sync::Mutex`.
+///
+/// `Clone` shares the same state `Arc`, so `create_overlays` can clone the
+/// session into every overlay's `on_draw`/`on_event` closure.
+#[derive(Clone)]
 pub struct CaptureSession {
     state: Arc<std::sync::Mutex<SessionState>>,
 }
@@ -101,6 +110,17 @@ impl CaptureSession {
         let mut state = self.state.lock().unwrap();
         state.shots = shots;
         log::info!("captured {} monitors", state.shots.len());
+    }
+
+    /// Record a created overlay window id (paired with the framework's
+    /// `core/window-created` event). Only tracks windows while overlays are
+    /// pending — used to destroy all overlays on ESC/confirm (CAP-05).
+    pub fn window_created(&self, id: WindowId) {
+        let mut state = self.state.lock().unwrap();
+        if state.pending_overlays > 0 {
+            state.overlay_ids.push(id);
+            state.pending_overlays -= 1;
+        }
     }
 }
 
@@ -137,5 +157,23 @@ mod tests {
         assert_eq!(state.shots[0].0.height, 2);
         assert_eq!(state.shots[0].1.width(), 2);
         assert_eq!(state.shots[0].1.height(), 2);
+    }
+
+    #[test]
+    fn window_created_tracks_overlay_ids_until_pending_drained() {
+        let session = CaptureSession::new();
+        {
+            let state_arc = session.state();
+            let mut state = state_arc.lock().unwrap();
+            state.pending_overlays = 2;
+        }
+        session.window_created(10);
+        session.window_created(20);
+        session.window_created(30); // extra — pending already drained, ignored
+
+        let state = session.state();
+        let state = state.lock().unwrap();
+        assert_eq!(state.overlay_ids, vec![10, 20]);
+        assert_eq!(state.pending_overlays, 0);
     }
 }

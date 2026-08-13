@@ -7,6 +7,7 @@
 //! [`CaptureSession`] (no overlay window yet — that lands in 02-02).
 
 pub mod capture;
+pub mod overlay;
 pub mod permission;
 pub mod session;
 
@@ -18,6 +19,7 @@ use mybox_core::log;
 use mybox_core::module::Module;
 use mybox_core::toml;
 use mybox_core::tray_icon;
+use mybox_core::window::WindowManagerHandle;
 use mybox_core::{ConfigCenter, ModuleContext, UiThreadProxy};
 
 use capture::{capture_all_monitors, CaptureFn};
@@ -76,6 +78,7 @@ impl Module for CaptureModule {
         // Hotkey entry: core/hotkey.triggered with action "start_screenshot".
         let hotkey_session = Arc::clone(&session);
         let hotkey_ui = ctx.ui().clone();
+        let hotkey_windows = ctx.windows().clone();
         let hotkey_capture = self.capture.clone();
         let hotkey_access = self.access;
         ctx.on(
@@ -89,6 +92,7 @@ impl Module for CaptureModule {
                         start_capture(
                             &hotkey_session,
                             &hotkey_ui,
+                            hotkey_windows.clone(),
                             hotkey_capture.clone(),
                             hotkey_access,
                         );
@@ -100,6 +104,7 @@ impl Module for CaptureModule {
         // Tray menu entry: core/menu.triggered with menu_id "capture.start".
         let menu_session = Arc::clone(&session);
         let menu_ui = ctx.ui().clone();
+        let menu_windows = ctx.windows().clone();
         let menu_capture = self.capture.clone();
         let menu_access = self.access;
         ctx.on(
@@ -108,8 +113,28 @@ impl Module for CaptureModule {
                 if let EventPayload::Module(v) = &e.payload {
                     if v.get("menu_id").and_then(|m| m.as_str()) == Some("capture.start") {
                         log::info!("capture: menu 'capture.start' triggered");
-                        start_capture(&menu_session, &menu_ui, menu_capture.clone(), menu_access);
+                        start_capture(
+                            &menu_session,
+                            &menu_ui,
+                            menu_windows.clone(),
+                            menu_capture.clone(),
+                            menu_access,
+                        );
                     }
+                }
+            }),
+        );
+
+        // Pair framework window ids with overlays: the core emits
+        // `core/window-created` after each overlay window is created on the main
+        // thread; `window_created` records ids so ESC/confirm can destroy them
+        // (CAP-05).
+        let wc_session = Arc::clone(&session);
+        ctx.on(
+            EventFilter::kind("core", "window-created"),
+            Box::new(move |e| {
+                if let EventPayload::Framework(FrameworkEvent::WindowCreated(id)) = &e.payload {
+                    wc_session.window_created(*id);
                 }
             }),
         );
@@ -134,11 +159,13 @@ impl Module for CaptureModule {
 
 /// Preflight permission, then capture on a named worker thread. Results are
 /// forwarded to the main thread via `UiThreadProxy` and stored in the session
-/// (RESEARCH Pattern 4). `capture`/`access` are injected so headless tests can
-/// substitute fakes — this is the only injection point for tests.
+/// (RESEARCH Pattern 4); on success the per-monitor overlay windows are created
+/// (CAP-02). `capture`/`access` are injected so headless tests can substitute
+/// fakes — this is the only injection point for tests.
 fn start_capture(
     session: &Arc<CaptureSession>,
     ui: &UiThreadProxy,
+    windows: Arc<WindowManagerHandle>,
     capture: CaptureFn,
     access: AccessChecker,
 ) {
@@ -155,7 +182,10 @@ fn start_capture(
         .spawn(move || {
             let result = capture();
             ui.run(Box::new(move || match result {
-                Ok(shots) => session.store_shots(shots),
+                Ok(shots) => {
+                    session.store_shots(shots);
+                    overlay::create_overlays(&session, &windows);
+                }
                 Err(e) => log::error!("capture failed: {e:#}"),
             }));
         })
@@ -174,7 +204,6 @@ fn hotkey_from_config(config: &ConfigCenter) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mybox_core::window::WindowManagerHandle;
     use mybox_core::{Event, EventBus, HotkeyManager};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -245,6 +274,7 @@ mod tests {
         // session is stashed (no proxy) and covered by session::store_shots.
         let session = Arc::new(CaptureSession::new());
         let ui = UiThreadProxy::new();
+        let windows = Arc::new(WindowManagerHandle::new());
 
         let count = Arc::new(AtomicUsize::new(0));
         let c = count.clone();
@@ -253,7 +283,7 @@ mod tests {
             Ok(vec![sample_shot()])
         });
 
-        start_capture(&session, &ui, fake, || true);
+        start_capture(&session, &ui, windows, fake, || true);
 
         assert!(
             wait_until(|| count.load(Ordering::SeqCst) > 0),
@@ -265,6 +295,7 @@ mod tests {
     fn start_capture_aborts_when_access_denied() {
         let session = Arc::new(CaptureSession::new());
         let ui = UiThreadProxy::new();
+        let windows = Arc::new(WindowManagerHandle::new());
 
         let count = Arc::new(AtomicUsize::new(0));
         let c = count.clone();
@@ -273,7 +304,7 @@ mod tests {
             Ok(vec![sample_shot()])
         });
 
-        start_capture(&session, &ui, fake, || false);
+        start_capture(&session, &ui, windows, fake, || false);
 
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(

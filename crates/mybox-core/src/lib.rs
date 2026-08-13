@@ -36,6 +36,11 @@ pub use log;
 pub use tiny_skia;
 pub use toml;
 pub use tray_icon;
+// Re-exported so feature-module crates can construct the per-window event
+// closures (`WindowSpec.on_event: Box<dyn Fn(&winit::event::WindowEvent) …>`)
+// without depending on `winit` directly — same rationale as `tiny_skia`/
+// `tray_icon` (FRMW-02).
+pub use winit;
 pub use window::{
     window_attributes, WindowId, WindowKind, WindowManager, WindowManagerHandle, WindowRequest,
     WindowSpec, WindowState,
