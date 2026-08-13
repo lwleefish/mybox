@@ -20,6 +20,12 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 
+# macOS: raise capture-overlay windows above the menu bar + Dock (see
+# `window::elevate_overlay_window`). Version pinned to the same objc2 line
+# winit 0.30 links against so the NSView/NSWindow classes match winit's.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.2.2", features = ["NSView", "NSWindow"] }
+
 # Note: the #[ignore] display/integration tests (tests/integration.rs) and the
 # display_checks bin (src/bin/display_checks.rs) use winit + tiny-skia, which
 # are already regular [dependencies] above — no [dev-dependencies] needed.

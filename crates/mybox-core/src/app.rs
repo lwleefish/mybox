@@ -40,7 +40,8 @@ use crate::module::{Module, ModuleRegistry};
 use crate::renderer::Renderer;
 use crate::tray::TrayManager;
 use crate::window::{
-    window_attributes, WindowId, WindowManager, WindowManagerHandle, WindowRequest, WindowSpec,
+    window_attributes, WindowId, WindowKind, WindowManager, WindowManagerHandle, WindowRequest,
+    WindowSpec,
 };
 
 /// Events mybox injects into the winit loop (RESEARCH §4).
@@ -318,6 +319,20 @@ impl App {
         let window = el
             .create_window(attrs)
             .map_err(|e| MyboxError::Window(format!("create window '{:?}': {e}", spec.kind)))?;
+        if spec.kind == WindowKind::Overlay {
+            // macOS: raise the overlay above the menu bar + Dock so the mask
+            // covers the full display (winit's AlwaysOnTop = level 3 sits
+            // below both — debug session `overlay-not-fullscreen-enter`).
+            #[cfg(target_os = "macos")]
+            crate::window::elevate_overlay_window(&window);
+            // Activate the app + make the overlay key so keyboard input
+            // (Enter/ESC) works immediately after the hotkey fires. With
+            // `ActivationPolicy::Accessory` a global hotkey does not activate
+            // the app, and `set_visible` alone does not make a window key
+            // while the app is inactive — without this the user must click
+            // (start a drag) before Enter/ESC respond.
+            window.focus_window();
+        }
         let winit_id = window.id();
         let id = self.windows.next_id();
         let window = Arc::new(window);

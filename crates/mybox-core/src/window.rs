@@ -69,6 +69,47 @@ impl Default for WindowSpec {
 /// Framework window id — a u64 incrementing counter (RESEARCH §11 #6).
 pub type WindowId = u64;
 
+/// macOS: raise an Overlay window above the menu bar and the Dock so the
+/// capture mask covers the *full* display.
+///
+/// `window_attributes` maps the Overlay profile to
+/// `WindowLevel::AlwaysOnTop`, which winit 0.30 maps to
+/// `kCGFloatingWindowLevel` (3) on macOS — below the Dock (20) and the menu
+/// bar (24). At that level the overlay's top/bottom strips stay hidden behind
+/// them, so the mask visually covers only the middle of the screen (debug
+/// session `overlay-not-fullscreen-enter`). winit exposes no public API for
+/// arbitrary levels, so this reaches the `NSWindow` through the
+/// raw-window-handle (the `NSView` winit owns) and sets the level directly.
+///
+/// Must be called on the main thread (from `App::create_window`).
+#[cfg(target_os = "macos")]
+pub fn elevate_overlay_window(window: &winit::window::Window) {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else {
+        log::warn!("overlay: raw window handle unavailable — level not raised");
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        log::warn!("overlay: not an AppKit window — level not raised");
+        return;
+    };
+    // SAFETY: `ns_view` is the live content NSView owned by winit's window
+    // delegate (raw-window-handle contract). We are on the main thread, the
+    // pointer outlives this call (the window is alive), and the ObjC class is
+    // the same `NSView` regardless of objc2 crate version.
+    let view: &objc2_app_kit::NSView = unsafe { &*(appkit.ns_view.as_ptr() as *const _) };
+    match view.window() {
+        Some(ns_window) => {
+            // NSStatusWindowLevel (25) is above both the menu bar (24) and the
+            // Dock (20); +1 keeps the mask above status-item windows too.
+            ns_window.setLevel(objc2_app_kit::NSStatusWindowLevel + 1);
+            log::debug!("overlay: window level raised above menu bar + Dock");
+        }
+        None => log::warn!("overlay: NSView has no window — level not raised"),
+    }
+}
+
 /// Build winit `WindowAttributes` for a spec (pure function — no platform
 /// calls, unit-testable).
 ///

@@ -2046,6 +2046,7 @@ dependencies = [
  "directories",
  "global-hotkey",
  "log",
+ "objc2-app-kit 0.2.2",
  "parking_lot",
  "serde",
  "serde_json",
