@@ -9,7 +9,8 @@
 use std::sync::Arc;
 
 use mybox_core::tiny_skia::{
-    IntSize, Paint, PathBuilder, Pixmap, PixmapMut, PixmapPaint, Point, Rect, Stroke, Transform,
+    Color, IntSize, Paint, PathBuilder, Pixmap, PixmapMut, PixmapPaint, Point, Rect, Stroke,
+    Transform,
 };
 use mybox_core::window::{WindowKind, WindowManagerHandle, WindowSpec};
 use mybox_core::winit::event::{ElementState, MouseButton, WindowEvent};
@@ -302,7 +303,7 @@ fn draw_size_label(pm: &mut PixmapMut, font: &ab_glyph::FontArc, sel: &Selection
     let w = (sel.x1 - sel.x0).round() as u32;
     let h = (sel.y1 - sel.y0).round() as u32;
     let label = format!("{w} × {h}");
-    text::draw_text(pm, font, &label, (sel.x0, sel.y0 - 6.0), 18.0);
+    text::draw_text(pm, font, &label, (sel.x0, sel.y0 - 6.0), 18.0, Color::WHITE);
 }
 
 #[cfg(test)]

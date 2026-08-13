@@ -42,8 +42,9 @@ pub enum Tool {
 }
 
 /// A retained annotation (undo = pop + full redraw from the list — never bake
-/// into pixels, RESEARCH Anti-Pattern). Declared now so 02-02/02-03/02-04
-/// compile against it; drawing lands in a later plan.
+/// into pixels, RESEARCH Anti-Pattern). Declared here (02-01 skeleton) so
+/// 02-02/02-03/02-04 compile against it; drawing lives in `crate::annotate`.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Annotation {
     Rect {
         a: tiny_skia::Point,

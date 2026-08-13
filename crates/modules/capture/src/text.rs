@@ -9,7 +9,7 @@
 use std::sync::OnceLock;
 
 use ab_glyph::{point, Font, FontArc, FontVec, ScaleFont};
-use mybox_core::tiny_skia::PixmapMut;
+use mybox_core::tiny_skia::{Color, PixmapMut};
 
 /// Load the shared text font, caching it behind a `OnceLock` (A4).
 ///
@@ -28,10 +28,17 @@ pub fn load_font() -> FontArc {
     .clone()
 }
 
-/// Draw `text` (white, solid) with `at` as the baseline position and `size` in
-/// pixels. Coverage from `OutlinedGlyph::draw` is blended as alpha into the
-/// pixmap (premultiplied src-over).
-pub fn draw_text(pm: &mut PixmapMut, font: &FontArc, text: &str, at: (f32, f32), size: f32) {
+/// Draw `text` in the given `color` with `at` as the baseline position and
+/// `size` in pixels. Coverage from `OutlinedGlyph::draw` is blended as alpha
+/// into the pixmap (premultiplied src-over).
+pub fn draw_text(
+    pm: &mut PixmapMut,
+    font: &FontArc,
+    text: &str,
+    at: (f32, f32),
+    size: f32,
+    color: Color,
+) {
     let scaled = font.as_scaled(size);
     let mut pen_x = at.0;
     for ch in text.chars() {
@@ -46,16 +53,17 @@ pub fn draw_text(pm: &mut PixmapMut, font: &FontArc, text: &str, at: (f32, f32),
                 }
                 let px = bounds.min.x as i32 + gx as i32;
                 let py = (at.1 + bounds.min.y) as i32 + gy as i32;
-                blend_white(&mut *pm, px, py, cov);
+                blend_color(&mut *pm, px, py, cov, color);
             });
         }
         pen_x += advance;
     }
 }
 
-/// Blend a white pixel of the given coverage (0.0..=1.0) over the pixmap at
-/// `(x, y)` using premultiplied src-over. Out-of-bounds pixels are ignored.
-fn blend_white(pm: &mut PixmapMut, x: i32, y: i32, cov: f32) {
+/// Blend `color` at the given coverage (0.0..=1.0) over the pixmap at `(x, y)`
+/// using premultiplied src-over. The (opaque) source color is premultiplied by
+/// the coverage alpha before blending. Out-of-bounds pixels are ignored.
+fn blend_color(pm: &mut PixmapMut, x: i32, y: i32, cov: f32, color: Color) {
     let (w, h) = (pm.width() as i32, pm.height() as i32);
     if x < 0 || y < 0 || x >= w || y >= h {
         return;
@@ -64,14 +72,17 @@ fn blend_white(pm: &mut PixmapMut, x: i32, y: i32, cov: f32) {
     if alpha == 0 {
         return;
     }
+    // Premultiply the (opaque) source color by the coverage alpha.
+    let sr = (u32::from((color.red() * 255.0).round() as u8) * u32::from(alpha) / 255) as u8;
+    let sg = (u32::from((color.green() * 255.0).round() as u8) * u32::from(alpha) / 255) as u8;
+    let sb = (u32::from((color.blue() * 255.0).round() as u8) * u32::from(alpha) / 255) as u8;
     let idx = (y as usize * pm.width() as usize + x as usize) * 4;
     let data = pm.data_mut();
     let inv = 255 - u32::from(alpha);
-    // src-over, premultiplied white source = (alpha, alpha, alpha, alpha).
+    data[idx + 0] = (u32::from(sr) + u32::from(data[idx + 0]) * inv / 255) as u8;
+    data[idx + 1] = (u32::from(sg) + u32::from(data[idx + 1]) * inv / 255) as u8;
+    data[idx + 2] = (u32::from(sb) + u32::from(data[idx + 2]) * inv / 255) as u8;
     data[idx + 3] = (u32::from(alpha) + u32::from(data[idx + 3]) * inv / 255) as u8;
-    data[idx + 0] = (u32::from(alpha) + u32::from(data[idx + 0]) * inv / 255) as u8;
-    data[idx + 1] = (u32::from(alpha) + u32::from(data[idx + 1]) * inv / 255) as u8;
-    data[idx + 2] = (u32::from(alpha) + u32::from(data[idx + 2]) * inv / 255) as u8;
 }
 
 #[cfg(test)]
@@ -85,7 +96,7 @@ mod tests {
         let mut pixmap = Pixmap::new(40, 20).expect("40x20 pixmap");
         {
             let mut pm = pixmap.as_mut();
-            draw_text(&mut pm, &font, "12 × 34", (2.0, 15.0), 16.0);
+            draw_text(&mut pm, &font, "12 × 34", (2.0, 15.0), 16.0, Color::WHITE);
         }
         let data = pixmap.data();
         let mut any_alpha = false;
@@ -107,7 +118,7 @@ mod tests {
         let font = load_font();
         let mut pixmap = Pixmap::new(40, 20).expect("40x20 pixmap");
         let mut pm = pixmap.as_mut();
-        draw_text(&mut pm, &font, "12 × 34", (-20.0, -20.0), 16.0);
+        draw_text(&mut pm, &font, "12 × 34", (-20.0, -20.0), 16.0, Color::WHITE);
         // No panic = pass.
     }
 }

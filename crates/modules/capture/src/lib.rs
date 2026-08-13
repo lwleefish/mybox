@@ -6,6 +6,7 @@
 //! the main thread through `UiThreadProxy` and stored in the shared
 //! [`CaptureSession`] (no overlay window yet — that lands in 02-02).
 
+pub mod annotate;
 pub mod capture;
 pub mod overlay;
 pub mod permission;
