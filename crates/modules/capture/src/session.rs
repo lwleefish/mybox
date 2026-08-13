@@ -104,6 +104,10 @@ pub struct SessionState {
     pub active_handle: Option<Handle>,
     /// Last known cursor position, used to hit-test handles on mouse-down.
     pub last_cursor: Option<tiny_skia::Point>,
+    /// The monitor whose overlay last reported a cursor position (`last_cursor`
+    /// is monitor-local, so the owning monitor must be tracked separately).
+    /// Drives the Enter-without-selection full-screen fallback in `confirm`.
+    pub last_cursor_monitor: Option<usize>,
     /// Whether Ctrl (or Cmd on macOS) is currently held, tracked via
     /// `ModifiersChanged` so Ctrl+Z can be detected on `KeyboardInput`.
     pub ctrl_down: bool,
@@ -138,6 +142,7 @@ impl Default for SessionState {
             move_rect: None,
             active_handle: None,
             last_cursor: None,
+            last_cursor_monitor: None,
             ctrl_down: false,
             current_tool: Tool::Select,
             annotations: AnnotationList::default(),
@@ -319,6 +324,7 @@ impl CaptureSession {
     pub fn on_mouse_move(&self, monitor: usize, pos: tiny_skia::Point) {
         let mut state = self.state.lock().unwrap();
         state.last_cursor = Some(pos);
+        state.last_cursor_monitor = Some(monitor);
         // Track the in-progress annotation drag (rect/arrow/pen) in parallel
         // with the selection/handle drag (D-03: both coexist).
         update_pending_annotation(&mut state, pos);
@@ -484,11 +490,34 @@ impl CaptureSession {
     /// mutating the shared state. Pure and idempotent: a failed copy can be
     /// retried by calling `confirm()` again.
     ///
-    /// Returns `None` when there is no selection yet or the selected monitor has
-    /// no capture (T-2-15 guard — never enter the clipboard path on empty state).
+    /// With no selection yet, Enter falls back to the **full screen** of the
+    /// monitor under the cursor (or the first captured monitor when the cursor
+    /// has not been seen) instead of doing nothing — debug session
+    /// `overlay-not-fullscreen-enter`.
+    ///
+    /// Returns `None` when there are no captured shots at all (T-2-15 guard —
+    /// never enter the clipboard path on empty state).
     pub fn confirm(&self) -> Option<ConfirmSnapshot> {
         let state = self.state.lock().unwrap();
-        let (monitor_index, rect) = state.selection?;
+        let (monitor_index, rect) = match state.selection {
+            Some(sel) => sel,
+            None => {
+                let mi = state
+                    .last_cursor_monitor
+                    .filter(|mi| *mi < state.shots.len())
+                    .unwrap_or(0);
+                let (geom, _) = state.shots.get(mi)?;
+                (
+                    mi,
+                    SelectionRect {
+                        x0: 0.0,
+                        y0: 0.0,
+                        x1: geom.width as f32,
+                        y1: geom.height as f32,
+                    },
+                )
+            }
+        };
         let shot = state.shots.get(monitor_index)?.1.clone();
         let annotations = state.annotations.items.clone();
         Some(ConfirmSnapshot {
@@ -514,6 +543,7 @@ impl CaptureSession {
         state.move_rect = None;
         state.active_handle = None;
         state.last_cursor = None;
+        state.last_cursor_monitor = None;
         state.pending_annotation = None;
         state.annotations = AnnotationList::default();
         // Overlays whose `core/window-created` events are still in flight (the
@@ -930,15 +960,96 @@ mod tests {
     }
 
     #[test]
-    fn confirm_returns_none_without_selection_or_shot() {
+    fn confirm_returns_none_without_any_shots() {
         let session = CaptureSession::new();
-        assert!(session.confirm().is_none(), "no selection => None");
+        assert!(
+            session.confirm().is_none(),
+            "no shots => None (T-2-15: never copy from empty state)"
+        );
 
-        // Selection exists but the monitor has no capture (T-2-15 guard).
+        // A selection exists but no monitor has a capture (T-2-15 guard).
         session.on_mouse_down(0, tiny_skia::Point::from_xy(1.0, 1.0));
         session.on_mouse_move(0, tiny_skia::Point::from_xy(3.0, 3.0));
         session.on_mouse_up();
         assert!(session.confirm().is_none(), "selection with no shot => None");
+    }
+
+    #[test]
+    fn confirm_without_selection_falls_back_to_full_monitor() {
+        // Two captured monitors, no selection: Enter confirms the full screen
+        // of the monitor under the cursor (falling back to the first monitor
+        // before any cursor movement) — debug session
+        // `overlay-not-fullscreen-enter`.
+        let session = CaptureSession::new();
+        session.store_shots(vec![
+            (
+                MonitorGeom {
+                    x: 0,
+                    y: 0,
+                    width: 200,
+                    height: 100,
+                },
+                xcap::image::RgbaImage::new(200, 100),
+            ),
+            (
+                MonitorGeom {
+                    x: 200,
+                    y: 0,
+                    width: 300,
+                    height: 200,
+                },
+                xcap::image::RgbaImage::new(300, 200),
+            ),
+        ]);
+
+        // No cursor seen yet: fall back to the first captured monitor.
+        let snap = session
+            .confirm()
+            .expect("no selection + shots => full-screen snapshot");
+        assert_eq!(snap.monitor_index, 0);
+        assert_eq!(
+            snap.rect,
+            SelectionRect {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 200.0,
+                y1: 100.0
+            }
+        );
+        assert_eq!((snap.shot.width(), snap.shot.height()), (200, 100));
+
+        // Cursor moved over monitor 1: full screen of monitor 1.
+        session.on_mouse_move(1, tiny_skia::Point::from_xy(50.0, 50.0));
+        let snap = session
+            .confirm()
+            .expect("cursor monitor must drive the fallback");
+        assert_eq!(snap.monitor_index, 1);
+        assert_eq!(
+            snap.rect,
+            SelectionRect {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 300.0,
+                y1: 200.0
+            }
+        );
+        assert_eq!((snap.shot.width(), snap.shot.height()), (300, 200));
+
+        // A real selection still wins over the fallback.
+        session.on_mouse_down(0, tiny_skia::Point::from_xy(10.0, 10.0));
+        session.on_mouse_move(0, tiny_skia::Point::from_xy(60.0, 40.0));
+        session.on_mouse_up();
+        let snap = session.confirm().expect("selection must still confirm");
+        assert_eq!(snap.monitor_index, 0);
+        assert_eq!(
+            snap.rect,
+            SelectionRect {
+                x0: 10.0,
+                y0: 10.0,
+                x1: 60.0,
+                y1: 40.0
+            }
+        );
     }
 
     #[test]
