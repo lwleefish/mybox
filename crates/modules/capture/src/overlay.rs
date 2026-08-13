@@ -14,6 +14,7 @@ use mybox_core::tiny_skia::{
 use mybox_core::window::{WindowKind, WindowManagerHandle, WindowSpec};
 use mybox_core::winit::event::{ElementState, MouseButton, WindowEvent};
 use mybox_core::winit::keyboard::{Key, NamedKey};
+use mybox_core::winit::window::CursorIcon;
 use mybox_core::{log, Event, EventPayload};
 
 use crate::clipboard;
@@ -26,8 +27,9 @@ use crate::toolbar::{self, ToolAction};
 /// area).
 pub const MASK_ALPHA: u8 = 0x80;
 
-/// On-screen size of the 8 resize handles (D-02: 6px white squares).
-const HANDLE_SIZE: f32 = 6.0;
+/// On-screen size of the 8 resize handles (D-02: white squares). Sized for a
+/// comfortable grab target on high-DPI displays.
+const HANDLE_SIZE: f32 = 12.0;
 
 /// Convert straight-alpha RGBA8 bytes to premultiplied RGBA8 (Pitfall 2).
 ///
@@ -133,6 +135,7 @@ pub fn create_overlays(session: &CaptureSession, windows: &Arc<WindowManagerHand
                     &event_windows,
                     monitor_index,
                     width as f32,
+                    height as f32,
                     event,
                 );
             })),
@@ -187,7 +190,7 @@ fn draw_overlay(
 
         // Unified no-modes toolbar, anchored below the selection's bottom-left
         // (D-03).
-        let buttons = toolbar::layout_buttons((sel.x0, sel.y1), w as f32);
+        let buttons = toolbar::layout_buttons(&sel, w as f32, h as f32);
         toolbar::draw_toolbar(pm, &buttons, state.current_tool);
     }
 }
@@ -205,27 +208,94 @@ fn composite_frame(
     dimmed: &Pixmap,
     selection: Option<&SelectionRect>,
 ) {
+    let dst_w = pm.width() as usize;
+    let dst_h = pm.height() as usize;
     let dst = pm.data_mut();
+
+    // Full-screen dimmed blit (memcpy). If the pixmap is larger than the dimmed
+    // capture the tail stays untouched (sizes are equal in practice).
     let src = dimmed.data();
     let n = src.len().min(dst.len());
     dst[..n].copy_from_slice(&src[..n]);
 
     if let Some(sel) = selection {
-        let fw = frame.width();
-        let fh = frame.height();
-        let x0 = sel.x0.round().clamp(0.0, fw as f32) as u32;
-        let y0 = sel.y0.round().clamp(0.0, fh as f32) as u32;
-        let x1 = sel.x1.round().clamp(0.0, fw as f32) as u32;
-        let y1 = sel.y1.round().clamp(0.0, fh as f32) as u32;
+        let fw = frame.width() as usize;
+        let fh = frame.height() as usize;
+        // Clamp to the intersection of source and destination bounds so a
+        // selection can never read or write out of range (T-2-15).
+        let x0 = (sel.x0.round().max(0.0) as usize).min(fw.min(dst_w));
+        let y0 = (sel.y0.round().max(0.0) as usize).min(fh.min(dst_h));
+        let x1 = (sel.x1.round().max(0.0) as usize).min(fw.min(dst_w));
+        let y1 = (sel.y1.round().max(0.0) as usize).min(fh.min(dst_h));
         if x1 > x0 && y1 > y0 {
             let orig = frame.data();
-            let stride = fw as usize * 4;
-            let row_len = (x1 - x0) as usize * 4;
+            let src_stride = fw * 4;
+            let dst_stride = dst_w * 4;
+            let row_len = (x1 - x0) * 4;
             for row in y0..y1 {
-                let off = row as usize * stride + x0 as usize * 4;
-                dst[off..off + row_len].copy_from_slice(&orig[off..off + row_len]);
+                let src_off = row * src_stride + x0 * 4;
+                let dst_off = row * dst_stride + x0 * 4;
+                dst[dst_off..dst_off + row_len].copy_from_slice(&orig[src_off..src_off + row_len]);
             }
         }
+    }
+}
+
+/// Resize cursor for a given handle direction.
+fn handle_cursor(h: selection::Handle) -> CursorIcon {
+    match h {
+        selection::Handle::N | selection::Handle::S => CursorIcon::NsResize,
+        selection::Handle::E | selection::Handle::W => CursorIcon::EwResize,
+        selection::Handle::NE => CursorIcon::NeResize,
+        selection::Handle::NW => CursorIcon::NwResize,
+        selection::Handle::SE => CursorIcon::SeResize,
+        selection::Handle::SW => CursorIcon::SwResize,
+    }
+}
+
+/// The cursor to show over this monitor's overlay at `pos`: crosshair while no
+/// selection exists, resize over handles, move inside the selection, arrow over
+/// the toolbar, crosshair elsewhere (ready to draw a fresh selection).
+fn cursor_for(
+    session: &CaptureSession,
+    monitor_index: usize,
+    screen_w: f32,
+    screen_h: f32,
+    pos: Point,
+) -> CursorIcon {
+    let Some((mi, sel)) = session.selection() else {
+        return CursorIcon::Crosshair;
+    };
+    if mi != monitor_index {
+        return CursorIcon::Crosshair;
+    }
+    let buttons = toolbar::layout_buttons(&sel, screen_w, screen_h);
+    if toolbar::hit_test(&buttons, pos).is_some() {
+        return CursorIcon::Default;
+    }
+    if let Some(h) = selection::hit_test_handle(&sel, pos, HANDLE_SIZE) {
+        return handle_cursor(h);
+    }
+    let inside = pos.x >= sel.x0 && pos.x <= sel.x1 && pos.y >= sel.y0 && pos.y <= sel.y1;
+    if inside {
+        CursorIcon::Move
+    } else {
+        CursorIcon::Crosshair
+    }
+}
+
+/// Push a cursor change for this monitor's overlay to the window manager.
+fn update_cursor(
+    session: &CaptureSession,
+    windows: &WindowManagerHandle,
+    monitor_index: usize,
+    screen_w: f32,
+    screen_h: f32,
+    pos: Point,
+) {
+    if let Some(id) = session.overlay_id(monitor_index) {
+        let icon = cursor_for(session, monitor_index, screen_w, screen_h, pos);
+        windows.set_cursor(id, icon);
     }
 }
 
@@ -237,6 +307,7 @@ fn handle_overlay_event(
     windows: &WindowManagerHandle,
     monitor_index: usize,
     screen_w: f32,
+    screen_h: f32,
     event: &WindowEvent,
 ) {
     match event {
@@ -245,6 +316,7 @@ fn handle_overlay_event(
             // Handles the selection drag, active-handle resize, and the
             // in-progress annotation endpoint/path (D-03: all coexist).
             session.on_mouse_move(monitor_index, pos);
+            update_cursor(session, windows, monitor_index, screen_w, screen_h, pos);
             redraw_all_overlays(session, windows);
         }
         WindowEvent::MouseInput {
@@ -257,7 +329,7 @@ fn handle_overlay_event(
                 let toolbar_action = session
                     .selection()
                     .filter(|(mi, _)| *mi == monitor_index)
-                    .map(|(_, sel)| toolbar::layout_buttons((sel.x0, sel.y1), screen_w))
+                    .map(|(_, sel)| toolbar::layout_buttons(&sel, screen_w, screen_h))
                     .and_then(|buttons| toolbar::hit_test(&buttons, pos));
                 if let Some(action) = toolbar_action {
                     match action {
@@ -289,6 +361,9 @@ fn handle_overlay_event(
                     }
                 }
             }
+            if let Some(pos) = session.last_cursor() {
+                update_cursor(session, windows, monitor_index, screen_w, screen_h, pos);
+            }
             redraw_all_overlays(session, windows);
         }
         WindowEvent::MouseInput {
@@ -299,6 +374,9 @@ fn handle_overlay_event(
             session.on_mouse_up();
             session.on_annotation_finish();
             session.set_active_handle(None);
+            if let Some(pos) = session.last_cursor() {
+                update_cursor(session, windows, monitor_index, screen_w, screen_h, pos);
+            }
             redraw_all_overlays(session, windows);
         }
         WindowEvent::ModifiersChanged(mods) => {

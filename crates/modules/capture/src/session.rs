@@ -191,6 +191,18 @@ impl CaptureSession {
         }
     }
 
+    /// The framework window id for a given monitor's overlay, if already paired
+    /// (`overlay_ids` is populated in monitor order via `window_created`). Used
+    /// to target per-window cursor changes.
+    pub fn overlay_id(&self, monitor_index: usize) -> Option<WindowId> {
+        self.state
+            .lock()
+            .unwrap()
+            .overlay_ids
+            .get(monitor_index)
+            .copied()
+    }
+
     /// Current interaction phase.
     pub fn phase(&self) -> Phase {
         self.state.lock().unwrap().phase

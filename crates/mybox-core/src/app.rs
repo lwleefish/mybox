@@ -431,6 +431,13 @@ impl winit::application::ApplicationHandler<AppEvent> for App {
                         }
                     }
                 }
+                WindowRequest::SetCursor(id, icon) => {
+                    if let Some(s) = self.windows.get_mut(id) {
+                        if let Some(w) = &s.window {
+                            w.set_cursor(icon);
+                        }
+                    }
+                }
             }
         }
         el.set_control_flow(winit::event_loop::ControlFlow::Wait);
@@ -637,6 +644,7 @@ mod tests {
             Ok(WindowRequest::Create(s)) => assert_eq!(s.title, "plumbing"),
             Ok(WindowRequest::Destroy(_)) => panic!("expected Create, got Destroy"),
             Ok(WindowRequest::Redraw(_)) => panic!("expected Create, got Redraw"),
+            Ok(WindowRequest::SetCursor(_, _)) => panic!("expected Create, got SetCursor"),
             Err(_) => panic!("enqueued Create request never reached the App's window_rx"),
         }
     }

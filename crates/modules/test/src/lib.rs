@@ -180,6 +180,7 @@ mod tests {
             }
             Some(mybox_core::WindowRequest::Destroy(_)) => panic!("expected Create, got Destroy"),
             Some(mybox_core::WindowRequest::Redraw(_)) => panic!("expected Create, got Redraw"),
+            Some(mybox_core::WindowRequest::SetCursor(_, _)) => panic!("expected Create, got SetCursor"),
             None => panic!("no request queued"),
         }
         assert_eq!(

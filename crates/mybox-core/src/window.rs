@@ -164,6 +164,9 @@ pub enum WindowRequest {
     /// Request a redraw for a window (Phase 2). The App drains this in
     /// `about_to_wait` and calls `window.request_redraw()` on the main thread.
     Redraw(WindowId),
+    /// Change the mouse cursor shown over a window (Phase 2). The App drains
+    /// this in `about_to_wait` and calls `window.set_cursor_icon(icon)`.
+    SetCursor(WindowId, winit::window::CursorIcon),
 }
 
 /// Module-side handle to the window manager. Modules call `create`/`destroy`,
@@ -218,6 +221,14 @@ impl WindowManagerHandle {
     /// calls `window.request_redraw()` on the main thread.
     pub fn redraw(&self, id: WindowId) {
         let _ = self.tx.send(WindowRequest::Redraw(id));
+        self.trigger_wake();
+    }
+
+    /// Enqueue a cursor change and wake the loop (Phase 2). Modules call this
+    /// from the main-thread `on_event` route; the App drains it in
+    /// `about_to_wait` and calls `window.set_cursor_icon(icon)`.
+    pub fn set_cursor(&self, id: WindowId, icon: winit::window::CursorIcon) {
+        let _ = self.tx.send(WindowRequest::SetCursor(id, icon));
         self.trigger_wake();
     }
 

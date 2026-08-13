@@ -6,7 +6,7 @@ use mybox_core::tiny_skia::{
     Color, LineCap, Paint, PathBuilder, PixmapMut, Point, Rect, Stroke, Transform,
 };
 
-use crate::session::Tool;
+use crate::session::{SelectionRect, Tool};
 use crate::text;
 
 /// Button side length in physical pixels.
@@ -34,8 +34,9 @@ pub struct ToolbarButton {
 
 /// Lay out the seven toolbar buttons in a horizontal row, anchored just below
 /// the selection's bottom-left corner. If the row would overflow the right
-/// edge, it is shifted left (clamped to the screen).
-pub fn layout_buttons(selection_bottom_left: (f32, f32), screen_w: f32) -> Vec<ToolbarButton> {
+/// edge, it is shifted left (clamped to the screen); if it would overflow the
+/// bottom edge, it is flipped above the selection.
+pub fn layout_buttons(sel: &SelectionRect, screen_w: f32, screen_h: f32) -> Vec<ToolbarButton> {
     const ACTIONS: [ToolAction; 7] = [
         ToolAction::Confirm,
         ToolAction::Cancel,
@@ -47,11 +48,17 @@ pub fn layout_buttons(selection_bottom_left: (f32, f32), screen_w: f32) -> Vec<T
     ];
 
     let total_w = ACTIONS.len() as f32 * BUTTON_SIZE + (ACTIONS.len() - 1) as f32 * BUTTON_GAP;
-    let mut x = selection_bottom_left.0;
+    let mut x = sel.x0;
     if x + total_w > screen_w {
         x = (screen_w - total_w).max(0.0);
     }
-    let y = selection_bottom_left.1 + 6.0; // a small gap below the selection
+
+    // Prefer below the selection; flip above when it would clip the bottom edge.
+    let gap = 6.0;
+    let mut y = sel.y1 + gap;
+    if y + BUTTON_SIZE > screen_h {
+        y = (sel.y0 - gap - BUTTON_SIZE).max(0.0);
+    }
 
     let mut buttons = Vec::with_capacity(ACTIONS.len());
     for action in ACTIONS {
@@ -191,13 +198,17 @@ mod tests {
     use super::*;
     use mybox_core::tiny_skia::Pixmap;
 
+    fn sel(x0: f32, y0: f32, x1: f32, y1: f32) -> SelectionRect {
+        SelectionRect { x0, y0, x1, y1 }
+    }
+
     fn p(x: f32, y: f32) -> Point {
         Point::from_xy(x, y)
     }
 
     #[test]
     fn layout_buttons_produces_seven_in_order() {
-        let buttons = layout_buttons((100.0, 200.0), 1920.0);
+        let buttons = layout_buttons(&sel(100.0, 200.0, 400.0, 400.0), 1920.0, 1080.0);
         assert_eq!(buttons.len(), 7);
         let actions: Vec<ToolAction> = buttons.iter().map(|b| b.action).collect();
         assert_eq!(actions[0], ToolAction::Confirm);
@@ -211,24 +222,35 @@ mod tests {
 
     #[test]
     fn layout_buttons_anchors_below_selection_bottom_left() {
-        let buttons = layout_buttons((100.0, 200.0), 1920.0);
-        // First button sits 6px below the selection bottom (y = 200).
+        let buttons = layout_buttons(&sel(100.0, 200.0, 400.0, 400.0), 1920.0, 1080.0);
+        // First button sits 6px below the selection bottom (y = 400).
         assert_eq!(buttons[0].rect.x(), 100.0);
-        assert_eq!(buttons[0].rect.y(), 206.0);
+        assert_eq!(buttons[0].rect.y(), 406.0);
         assert_eq!(buttons[1].rect.x(), 100.0 + BUTTON_SIZE + BUTTON_GAP);
+    }
+
+    #[test]
+    fn layout_buttons_flips_above_when_bottom_would_overflow() {
+        // Selection bottom is at the screen edge: the toolbar flips above.
+        let buttons = layout_buttons(&sel(100.0, 1000.0, 400.0, 1080.0), 1920.0, 1080.0);
+        assert!(
+            buttons[0].rect.y() + BUTTON_SIZE <= 1080.0,
+            "toolbar must stay on screen"
+        );
+        assert!(buttons[0].rect.y() < 1000.0, "toolbar flips above the selection");
     }
 
     #[test]
     fn layout_buttons_clamps_when_overflowing_right_edge() {
         let total = 7.0 * BUTTON_SIZE + 6.0 * BUTTON_GAP;
-        let buttons = layout_buttons((900.0, 100.0), 800.0);
+        let buttons = layout_buttons(&sel(900.0, 100.0, 1900.0, 300.0), 800.0, 600.0);
         assert!(buttons[6].rect.right() <= 800.0, "last button must stay on screen");
         assert_eq!(buttons[0].rect.x(), (800.0 - total).max(0.0));
     }
 
     #[test]
     fn hit_test_hits_and_misses() {
-        let buttons = layout_buttons((100.0, 200.0), 1920.0);
+        let buttons = layout_buttons(&sel(100.0, 200.0, 400.0, 400.0), 1920.0, 1080.0);
         let center = p(
             buttons[3].rect.x() + BUTTON_SIZE / 2.0,
             buttons[3].rect.y() + BUTTON_SIZE / 2.0,
@@ -242,7 +264,8 @@ mod tests {
 
     #[test]
     fn draw_toolbar_highlights_current_tool() {
-        let buttons = layout_buttons((0.0, 0.0), 1920.0);
+        // y1 = 0 so the toolbar lands at y=6 (within the 40px-tall pixmap).
+        let buttons = layout_buttons(&sel(0.0, 0.0, 200.0, 0.0), 1920.0, 1080.0);
         let mut pixmap = Pixmap::new(260, 40).expect("pixmap");
         {
             let mut pm = pixmap.as_mut();
