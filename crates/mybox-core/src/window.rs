@@ -42,6 +42,13 @@ pub struct WindowSpec {
     pub cursor_icon: Option<winit::window::CursorIcon>,
     /// Per-window event callback (D-07 routing target).
     pub on_event: Option<Box<dyn Fn(&winit::event::WindowEvent) + Send + Sync>>,
+    /// Per-window event callback with window access (Phase 3, C3): the same
+    /// contract as `on_event` plus the winit window itself — egui-winit 0.30's
+    /// `on_window_event`/`take_egui_input` require `&Window`. Invoked right
+    /// after `on_event`, before the renderer match.
+    pub on_event_win: Option<
+        Box<dyn Fn(&Arc<winit::window::Window>, &winit::event::WindowEvent) + Send + Sync>,
+    >,
     /// Per-window draw callback (Phase 2): receives the tiny-skia pixmap and its
     /// size so the module can composite content (capture blit, mask, annotations,
     /// toolbar). Invoked by `handle_redraw` on the main thread before `present()`.
@@ -61,6 +68,7 @@ impl Default for WindowSpec {
             position: None,
             cursor_icon: None,
             on_event: None,
+            on_event_win: None,
             on_draw: None,
         }
     }
@@ -119,6 +127,56 @@ pub fn elevate_overlay_window(window: &winit::window::Window) {
     }
 }
 
+/// macOS: round the corners of a Floating window's content (C6, D-08).
+///
+/// softbuffer's macOS backend drops per-pixel alpha
+/// (`CGImageAlphaInfo::NoneSkipFirst`), so transparent corner pixels render
+/// black — per-pixel rounded corners are impossible (RESEARCH Pitfall 2).
+/// The rounded look instead comes from the NSWindow contentView's backing
+/// CALayer: `cornerRadius + masksToBounds` clips the opaque softbuffer content
+/// at the OS compositing layer.
+///
+/// Must be called on the main thread (from `App::create_window`). Failure
+/// paths warn + return (same discipline as `elevate_overlay_window`); if the
+/// layer trick does not visually clip (A2), the fallback is square corners
+/// logged as Phase 4 polish.
+#[cfg(target_os = "macos")]
+pub fn round_floating_corners(window: &winit::window::Window) {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else {
+        log::warn!("palette: raw window handle unavailable — corners not rounded");
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        log::warn!("palette: not an AppKit window — corners not rounded");
+        return;
+    };
+    // SAFETY: same contract as `elevate_overlay_window` — the NSView is the
+    // live content view winit owns, we are on the main thread, and the pointer
+    // outlives this call.
+    let view: &objc2_app_kit::NSView = unsafe { &*(appkit.ns_view.as_ptr() as *const _) };
+    let Some(ns_window) = view.window() else {
+        log::warn!("palette: NSView has no window — corners not rounded");
+        return;
+    };
+    let Some(content_view) = ns_window.contentView() else {
+        log::warn!("palette: NSWindow has no content view — corners not rounded");
+        return;
+    };
+    content_view.setWantsLayer(true);
+    // SAFETY: `layer()` returns the backing CALayer after `setWantsLayer(true)`
+    // (objc2 0.2 marks retained-return accessors unsafe); `None` means the
+    // layer did not materialize — warn and keep square corners.
+    let Some(layer) = (unsafe { content_view.layer() }) else {
+        log::warn!("palette: content view has no backing layer — corners not rounded");
+        return;
+    };
+    layer.setCornerRadius(12.0);
+    layer.setMasksToBounds(true);
+    log::debug!("palette: floating window corners rounded via NSWindow layer");
+}
+
 /// Build winit `WindowAttributes` for a spec (pure function — no platform
 /// calls, unit-testable).
 ///
@@ -143,7 +201,11 @@ pub fn window_attributes(spec: &WindowSpec) -> winit::window::WindowAttributes {
         WindowKind::Floating => {
             attrs = attrs
                 .with_decorations(false)
-                .with_window_level(winit::window::WindowLevel::AlwaysOnTop);
+                .with_window_level(winit::window::WindowLevel::AlwaysOnTop)
+                // C4: same as the Overlay arm — a borderless resizable window
+                // exposes invisible edge-resize gestures (the
+                // overlay-window-movable-at-edge bug class).
+                .with_resizable(false);
         }
         WindowKind::Panel => {
             attrs = attrs.with_decorations(true);
@@ -393,6 +455,7 @@ mod tests {
         assert!(spec.inner_size.is_none());
         assert!(spec.position.is_none());
         assert!(spec.on_event.is_none());
+        assert!(spec.on_event_win.is_none());
         assert!(spec.on_draw.is_none());
     }
 
@@ -485,6 +548,11 @@ mod window_manager {
             attrs.window_level,
             winit::window::WindowLevel::AlwaysOnTop,
             "Floating must be always-on-top"
+        );
+        assert!(
+            !attrs.resizable,
+            "Floating must be non-resizable (a borderless resizable window exposes edge-resize \
+             gestures — same bug class as overlay-window-movable-at-edge)"
         );
     }
 

@@ -2159,6 +2159,7 @@ dependencies = [
  "global-hotkey",
  "log",
  "objc2-app-kit 0.2.2",
+ "objc2-quartz-core 0.2.2",
  "parking_lot",
  "pollster",
  "serde",

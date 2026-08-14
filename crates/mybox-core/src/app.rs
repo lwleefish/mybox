@@ -354,19 +354,33 @@ impl App {
         let window = el
             .create_window(attrs)
             .map_err(|e| MyboxError::Window(format!("create window '{:?}': {e}", spec.kind)))?;
-        if spec.kind == WindowKind::Overlay {
-            // macOS: raise the overlay above the menu bar + Dock so the mask
-            // covers the full display (winit's AlwaysOnTop = level 3 sits
-            // below both — debug session `overlay-not-fullscreen-enter`).
-            #[cfg(target_os = "macos")]
-            crate::window::elevate_overlay_window(&window);
-            // Activate the app + make the overlay key so keyboard input
-            // (Enter/ESC) works immediately after the hotkey fires. With
-            // `ActivationPolicy::Accessory` a global hotkey does not activate
-            // the app, and `set_visible` alone does not make a window key
-            // while the app is inactive — without this the user must click
-            // (start a drag) before Enter/ESC respond.
-            window.focus_window();
+        match spec.kind {
+            WindowKind::Overlay => {
+                // macOS: raise the overlay above the menu bar + Dock so the mask
+                // covers the full display (winit's AlwaysOnTop = level 3 sits
+                // below both — debug session `overlay-not-fullscreen-enter`).
+                #[cfg(target_os = "macos")]
+                crate::window::elevate_overlay_window(&window);
+                // Activate the app + make the overlay key so keyboard input
+                // (Enter/ESC) works immediately after the hotkey fires. With
+                // `ActivationPolicy::Accessory` a global hotkey does not activate
+                // the app, and `set_visible` alone does not make a window key
+                // while the app is inactive — without this the user must click
+                // (start a drag) before Enter/ESC respond.
+                window.focus_window();
+            }
+            WindowKind::Floating => {
+                // C6: round the palette card corners via the NSWindow layer
+                // (per-pixel alpha is dropped by softbuffer on macOS).
+                #[cfg(target_os = "macos")]
+                crate::window::round_floating_corners(&window);
+                // C4 / Pitfall 1: same focus rationale as Overlay — under
+                // `ActivationPolicy::Accessory` the global hotkey does not
+                // activate the app, so without an explicit focus the borderless
+                // palette never receives keyboard input.
+                window.focus_window();
+            }
+            WindowKind::Panel => {}
         }
         let winit_id = window.id();
         let id = self.windows.next_id();
@@ -426,6 +440,15 @@ impl winit::application::ApplicationHandler<AppEvent> for App {
         if let Some(state) = self.windows.get_mut_by_winit(id) {
             if let Some(cb) = &state.spec.on_event {
                 cb(&event);
+            }
+            // C3: invoke `on_event_win` right after `on_event` (and before the
+            // renderer match) so the module's egui frame loop runs on
+            // RedrawRequested while the framebuffer is fresh — `handle_redraw`
+            // presents right after.
+            if let Some(cb) = &state.spec.on_event_win {
+                if let Some(w) = &state.window {
+                    cb(w, &event);
+                }
             }
             match event {
                 winit::event::WindowEvent::RedrawRequested => {

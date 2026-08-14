@@ -48,6 +48,11 @@ pub struct CaptureModule {
     access: AccessChecker,
     request: AccessRequester,
     open: SettingsOpener,
+    /// Injected at `init` (Phase 3): `commands()` only takes `&self`, so the
+    /// command runner reaches the main-thread proxy / window handle through
+    /// OnceLocks populated during init (the same shape as `session.bus`).
+    ui: Arc<std::sync::OnceLock<UiThreadProxy>>,
+    windows: Arc<std::sync::OnceLock<Arc<WindowManagerHandle>>>,
 }
 
 impl CaptureModule {
@@ -60,6 +65,8 @@ impl CaptureModule {
             access: permission::real_access_checker,
             request: Arc::new(permission::request_access),
             open: Arc::new(permission::open_system_settings),
+            ui: Arc::new(std::sync::OnceLock::new()),
+            windows: Arc::new(std::sync::OnceLock::new()),
         }
     }
 }
@@ -93,7 +100,56 @@ impl Module for CaptureModule {
         )]
     }
 
+    fn commands(&self) -> Vec<mybox_core::Command> {
+        // The palette entry for capture (Phase 3). The runner reuses
+        // `start_capture` verbatim, so the session's re-entrancy guard and the
+        // permission preflight stay intact. `hide_before_execute: true` — the
+        // panel must never appear in screenshots (UI-SPEC lifecycle rule 1).
+        // The `"jietu"` pinyin keyword is a data fix: fuzzy-matcher matches
+        // char subsequences, and "jt" is only a subsequence of "jietu"
+        // (RESEARCH Pitfall 6).
+        let session = Arc::clone(&self.session);
+        let ui = Arc::clone(&self.ui);
+        let windows = Arc::clone(&self.windows);
+        let capture = self.capture.clone();
+        let access = self.access;
+        let request = self.request.clone();
+        let open = self.open.clone();
+        vec![mybox_core::Command {
+            id: "capture.start",
+            name: "开始截图".to_string(),
+            description: "选择屏幕区域并复制到剪贴板".to_string(),
+            keywords: vec!["截图", "capture", "screen", "jietu"],
+            hide_before_execute: true,
+            runner: Arc::new(move || {
+                let session = Arc::clone(&session);
+                let ui = Arc::clone(&ui);
+                let windows = Arc::clone(&windows);
+                let capture = capture.clone();
+                let access = access;
+                let request = request.clone();
+                let open = open.clone();
+                Box::pin(async move {
+                    if let (Some(ui), Some(windows)) = (ui.get(), windows.get()) {
+                        // Fire-and-forget: start_capture spawns its own worker
+                        // thread and guards against re-entrancy internally.
+                        start_capture(&session, ui, Arc::clone(windows), capture, access, request, open);
+                    } else {
+                        log::warn!("capture command: module not initialized — ignored");
+                    }
+                    Ok(())
+                })
+            }),
+        }]
+    }
+
     fn init(&self, ctx: &ModuleContext) -> anyhow::Result<()> {
+        // Phase 3: inject the services the palette command runner needs (the
+        // `commands()` accessor only takes `&self` — OnceLock discipline,
+        // same as `session.bus`).
+        let _ = self.ui.set(ctx.ui().clone());
+        let _ = self.windows.set(ctx.windows().clone());
+
         let session = Arc::clone(&self.session);
         // The confirm flow emits `capture/screenshot-taken` from the overlay
         // `on_event` closure; give the session the shared bus to publish onto.
@@ -472,6 +528,8 @@ mod tests {
             access: || true,
             request: Arc::new(|| true),
             open: Arc::new(|| {}),
+            ui: Arc::new(std::sync::OnceLock::new()),
+            windows: Arc::new(std::sync::OnceLock::new()),
         };
         module.init(&ctx).expect("init registers handlers");
 
@@ -521,5 +579,57 @@ mod tests {
         CaptureModule::new()
             .init(&ctx)
             .expect("init must not panic headlessly (hotkey registration is deferred via ui proxy)");
+    }
+
+    #[test]
+    fn commands_returns_capture_start_with_jietu_keyword() {
+        let module = CaptureModule::new();
+        let cmds = module.commands();
+        assert_eq!(cmds.len(), 1, "capture contributes exactly one command");
+        let cmd = &cmds[0];
+        assert_eq!(cmd.id, "capture.start");
+        assert_eq!(cmd.name, "开始截图");
+        assert!(!cmd.description.is_empty(), "description must be non-empty");
+        assert!(
+            cmd.keywords.contains(&"jietu"),
+            "'jietu' pinyin keyword required so 'jt' fuzzy-matches (Pitfall 6)"
+        );
+        assert!(
+            cmd.hide_before_execute,
+            "panel must hide before capture starts (SPEC: never appear in screenshots)"
+        );
+    }
+
+    #[test]
+    fn capture_command_runner_invokes_start_capture() {
+        let (_bus, ctx) = sample_context();
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let c = count.clone();
+        let fake: CaptureFn = Arc::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![sample_shot()])
+        });
+
+        let module = CaptureModule {
+            session: Arc::new(CaptureSession::new()),
+            capture: fake,
+            access: || true,
+            request: Arc::new(|| true),
+            open: Arc::new(|| {}),
+            ui: Arc::new(std::sync::OnceLock::new()),
+            windows: Arc::new(std::sync::OnceLock::new()),
+        };
+        module.init(&ctx).expect("init injects ui/windows into the OnceLocks");
+
+        let cmds = module.commands();
+        let cmd = &cmds[0];
+        mybox_core::pollster::block_on((cmd.runner)()).expect("runner returns Ok");
+
+        // start_capture runs the injected fake on its own worker thread.
+        assert!(
+            wait_until(|| count.load(Ordering::SeqCst) > 0),
+            "command runner never invoked start_capture"
+        );
     }
 }
