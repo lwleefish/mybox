@@ -14,7 +14,7 @@
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: 框架核心** - 搭建模块化框架基础设施 (completed 2026-08-12)
-- [ ] **Phase 2: 截图模块** - 完整截图功能验证框架
+- [x] **Phase 2: 截图模块** - 完整截图功能验证框架 (completed 2026-08-13)
 - [ ] **Phase 3: 命令面板** - 统一交互入口
 - [ ] **Phase 4: 跨平台完善** - Windows 适配与打磨
 
@@ -70,19 +70,19 @@ Plans:
 Plans:
 **Wave 1** *(deps gate + core render chain + capture backend)*
 
-- [ ] 02-01: 依赖验证（xcap/arboard/ab_glyph 门禁）+ 框架渲染链路（on_draw/Redraw/batch_create 处置）+ 捕获后端（xcap 全屏捕获 + 权限预检 + SessionState）
+- [x] 02-01: 依赖验证（xcap/arboard/ab_glyph 门禁）+ 框架渲染链路（on_draw/Redraw/batch_create 处置）+ 捕获后端（xcap 全屏捕获 + 权限预检 + SessionState）
 
 **Wave 2** *(blocked on Wave 1)*
 
-- [ ] 02-02: 覆盖窗口显示（每屏一窗 + 画面/遮罩合成）+ 区域选择交互（拖拽/8 手柄/WxH 标签/ESC 取消）
+- [x] 02-02: 覆盖窗口显示（每屏一窗 + 画面/遮罩合成）+ 区域选择交互（拖拽/8 手柄/WxH 标签/ESC 取消）
 
 **Wave 3** *(blocked on Wave 2)*
 
-- [ ] 02-03: 标注工具（矩形/箭头/画笔/文字）+ 统一工具栏 + Ctrl+Z 撤销
+- [x] 02-03: 标注工具（矩形/箭头/画笔/文字）+ 统一工具栏 + Ctrl+Z 撤销
 
 **Wave 4** *(blocked on Wave 3)*
 
-- [ ] 02-04: 剪贴板复制（含标注）+ macOS 权限引导 + 确认流程串联 + 端到端测试
+- [x] 02-04: 剪贴板复制（含标注）+ macOS 权限引导 + 确认流程串联 + 端到端测试
 
 ### Phase 3: 命令面板
 
@@ -98,12 +98,16 @@ Plans:
   4. 用户通过方向键选择命令，回车执行对应功能
   5. 用户按 ESC 关闭命令面板
 
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
+**Wave 1**
 
-- [ ] 03-01: 命令面板窗口 + 命令注册系统
-- [ ] 03-02: 模糊搜索 + 键盘导航 + 命令执行
+- [ ] 03-01: 命令面板窗口 + 命令注册系统（核心命令系统 C1/C2/C5 + 框架窗口扩展 C3/C4/C6 + palette crate 唤出热键/建销/egui 渲染 + capture 命令注册 + 双路日志）
+
+**Wave 2** *(blocked on Wave 1)*
+
+- [ ] 03-02: 模糊搜索 + 键盘导航 + 命令执行（fuzzy-matcher 过滤高亮 + 导航状态机 + 执行生命周期 + E2E 集成测试）
 
 ### Phase 4: 跨平台完善
 
@@ -133,6 +137,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. 框架核心 | 4/4 | Complete   | 2026-08-12 |
-| 2. 截图模块 | 0/4 | Not started | - |
+| 2. 截图模块 | 4/4 | Complete   | 2026-08-13 |
 | 3. 命令面板 | 0/2 | Not started | - |
 | 4. 跨平台完善 | 0/2 | Not started | - |
