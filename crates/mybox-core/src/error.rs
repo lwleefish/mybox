@@ -33,6 +33,9 @@ pub enum MyboxError {
     /// Module registration or lifecycle error.
     #[error("module error: {0}")]
     Module(String),
+    /// Command registration error (duplicate command id — T-3-02).
+    #[error("command error: {0}")]
+    Command(String),
 }
 
 /// Convenience alias used throughout the framework.

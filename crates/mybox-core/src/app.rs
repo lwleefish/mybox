@@ -34,7 +34,7 @@ use std::sync::Arc;
 use crate::config::ConfigCenter;
 use crate::context::{ModuleContext, UiThreadProxy};
 use crate::error::{MyboxError, Result};
-use crate::event::{Event, EventBus, EventPayload, FrameworkEvent};
+use crate::event::{Event, EventBus, EventFilter, EventPayload, FrameworkEvent};
 use crate::hotkey::HotkeyManager;
 use crate::module::{Module, ModuleRegistry};
 use crate::renderer::Renderer;
@@ -63,6 +63,12 @@ pub enum AppEvent {
     /// pulse wakes the `ControlFlow::Wait` loop; the request itself is drained
     /// in `about_to_wait()` (W3).
     WindowRequested,
+    /// Exit the event loop (C5). Emitted by the bus `core/app-exit` forwarder —
+    /// the quit/restart builtin runners run on worker threads and can only
+    /// request the exit through the bus; `el.exit()` must run on the main
+    /// thread. `FrameworkEvent::AppExit` existed since Phase 1 but nothing
+    /// handled it until now.
+    Exit,
 }
 
 /// Builds a per-window [`Renderer`]. Takes the `Arc`-shared winit window because
@@ -125,11 +131,30 @@ impl AppBuilder {
         let hotkeys = Arc::new(HotkeyManager::new());
         let ui_proxy = UiThreadProxy::new();
 
+        // PAL-02 / C5: assemble the command registry BEFORE `ModuleContext::new`
+        // so modules can read commands during init. Module commands first (in
+        // registration order), then the four framework builtins (UI-SPEC order
+        // contract). A duplicate id bubbles up as `MyboxError::Command` (N1
+        // class — T-3-02).
+        let mut command_registry = crate::command::CommandRegistry::new();
+        for module in &module_refs {
+            for cmd in module.commands() {
+                command_registry.register(cmd)?;
+            }
+        }
+        let config_dir = crate::config::config_dir().unwrap_or_default();
+        let log_path = config_dir.join("logs").join("mybox.log");
+        for cmd in crate::command::BuiltinCommands::build(Arc::clone(&bus), config_dir, log_path) {
+            command_registry.register(cmd)?;
+        }
+        let commands = Arc::new(command_registry);
+
         let context = ModuleContext::new(
             Arc::clone(&bus),
             Arc::clone(&window_handle),
             Arc::clone(&config),
             Arc::clone(&hotkeys),
+            Arc::clone(&commands),
             ui_proxy.clone(),
         );
         // FRMW-01: each module's init runs exactly once, after config is loaded.
@@ -271,6 +296,16 @@ impl App {
         tray_icon::menu::MenuEvent::set_event_handler(Some(move |e| {
             let _ = menu_proxy.send_event(AppEvent::Menu(e));
         }));
+        // C5: the quit/restart builtin runners (worker threads) emit
+        // `core/app-exit`; forward it into the loop as `AppEvent::Exit` so the
+        // main thread can call `el.exit()`.
+        let exit_proxy = proxy.clone();
+        self.bus.on(
+            EventFilter::kind("core", "app-exit"),
+            Box::new(move |_| {
+                let _ = exit_proxy.send_event(AppEvent::Exit);
+            }),
+        );
     }
 
     /// Translate a hotkey trigger: `id` → configured action → bus event
@@ -412,7 +447,7 @@ impl winit::application::ApplicationHandler<AppEvent> for App {
     /// translated into bus events; `Ui` closures run on the main thread; `Tray`
     /// is logged; `WindowRequested` is a no-op wake pulse — the actual window
     /// work happens in `about_to_wait`, which is invoked right after this.
-    fn user_event(&mut self, _el: &winit::event_loop::ActiveEventLoop, event: AppEvent) {
+    fn user_event(&mut self, el: &winit::event_loop::ActiveEventLoop, event: AppEvent) {
         match event {
             AppEvent::Hotkey(e) => self.on_hotkey(e),
             AppEvent::Menu(e) => self.on_menu(e),
@@ -421,6 +456,7 @@ impl winit::application::ApplicationHandler<AppEvent> for App {
             }
             AppEvent::Tray(_) => log::debug!("tray icon event (ignored in Phase 1)"),
             AppEvent::WindowRequested => {}
+            AppEvent::Exit => el.exit(),
         }
     }
 
@@ -587,6 +623,7 @@ mod tests {
             Arc::new(WindowManagerHandle::new()),
             Arc::new(ConfigCenter::default()),
             Arc::new(HotkeyManager::new()),
+            Arc::new(crate::command::CommandRegistry::default()),
             UiThreadProxy::new(),
         );
         AppBuilder::init_modules(&registry, &ctx).expect("init ok");

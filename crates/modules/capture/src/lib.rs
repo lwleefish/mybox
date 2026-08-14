@@ -286,6 +286,7 @@ mod tests {
             Arc::clone(&handle),
             Arc::new(ConfigCenter::default()),
             Arc::new(HotkeyManager::new()),
+            Arc::new(mybox_core::CommandRegistry::default()),
             UiThreadProxy::new(),
         );
         (bus, ctx)

@@ -6,6 +6,7 @@
 //! public API re-exported here (FRMW-02).
 
 pub mod app;
+pub mod command;
 pub mod config;
 pub mod context;
 pub mod error;
@@ -17,6 +18,7 @@ pub mod tray;
 pub mod window;
 
 pub use app::{App, AppBuilder, AppEvent};
+pub use command::{BuiltinCommands, Command, CommandRegistry, CommandRunner, run_command};
 pub use config::{config_dir, config_file_path, ConfigCenter};
 pub use context::{ModuleContext, UiThreadProxy};
 pub use error::{MyboxError, Result};
@@ -41,6 +43,14 @@ pub use tray_icon;
 // without depending on `winit` directly — same rationale as `tiny_skia`/
 // `tray_icon` (FRMW-02).
 pub use winit;
+// Phase 3 (D-01): egui/egui-winit live in core and are re-exported so every
+// module reuses ONE egui pair (no per-module duplicate egui); fuzzy-matcher
+// and pollster serve the palette's filter and the async command runner
+// respectively (D-07). Same FRMW-02 module-boundary rationale.
+pub use egui;
+pub use egui_winit;
+pub use fuzzy_matcher;
+pub use pollster;
 pub use window::{
     window_attributes, WindowId, WindowKind, WindowManager, WindowManagerHandle, WindowRequest,
     WindowSpec, WindowState,

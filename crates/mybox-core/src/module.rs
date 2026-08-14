@@ -31,6 +31,13 @@ pub trait Module: Send + Sync + 'static {
         vec![]
     }
 
+    /// Commands contributed to the command palette (Phase 3, PAL-02 — SPEC
+    /// req 1). Modules that expose no commands keep the default empty list,
+    /// so this extension is non-breaking (same shape as `menu_items`).
+    fn commands(&self) -> Vec<crate::command::Command> {
+        vec![]
+    }
+
     /// Optional ordered cleanup on exit.
     fn shutdown(&self, _ctx: &ModuleContext) {}
 }
@@ -139,5 +146,13 @@ mod tests {
         assert_eq!(m.id(), "palette");
         assert_eq!(m.name(), "命令面板");
         assert!(reg.get_by_id("missing").is_none());
+    }
+
+    #[test]
+    fn default_commands_is_empty() {
+        // C1: the default `commands()` impl returns an empty list, so existing
+        // modules that don't implement it stay zero-breaking.
+        let m = FakeModule::new("capture", "截图");
+        assert!(m.commands().is_empty());
     }
 }

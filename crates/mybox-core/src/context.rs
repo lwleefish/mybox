@@ -20,6 +20,7 @@ pub struct ModuleContext {
     pub(crate) windows: Arc<WindowManagerHandle>,
     pub(crate) config: Arc<ConfigCenter>,
     pub(crate) hotkeys: Arc<HotkeyManager>,
+    pub(crate) commands: Arc<crate::command::CommandRegistry>,
     pub(crate) ui: UiThreadProxy,
 }
 
@@ -34,6 +35,7 @@ impl ModuleContext {
         windows: Arc<WindowManagerHandle>,
         config: Arc<ConfigCenter>,
         hotkeys: Arc<HotkeyManager>,
+        commands: Arc<crate::command::CommandRegistry>,
         ui: UiThreadProxy,
     ) -> Self {
         Self {
@@ -41,6 +43,7 @@ impl ModuleContext {
             windows,
             config,
             hotkeys,
+            commands,
             ui,
         }
     }
@@ -89,6 +92,13 @@ impl ModuleContext {
     /// in the 01-04 App via `init()` + `register_str()`.
     pub fn hotkeys(&self) -> &Arc<HotkeyManager> {
         &self.hotkeys
+    }
+
+    /// Access the shared command registry (Phase 3, PAL-02). Assembled in
+    /// `AppBuilder::build` BEFORE module init, so modules can read the full
+    /// command list during `init` (e.g. the palette snapshots it at summon).
+    pub fn commands(&self) -> &Arc<crate::command::CommandRegistry> {
+        &self.commands
     }
 }
 
@@ -176,6 +186,7 @@ mod tests {
             Arc::new(WindowManagerHandle::new()),
             Arc::new(ConfigCenter::default()),
             Arc::new(HotkeyManager::default()),
+            Arc::new(crate::command::CommandRegistry::default()),
             UiThreadProxy::new(),
         )
     }
@@ -229,6 +240,7 @@ mod tests {
             Arc::new(WindowManagerHandle::new()),
             Arc::clone(&config),
             Arc::clone(&hotkeys),
+            Arc::new(crate::command::CommandRegistry::default()),
             UiThreadProxy::new(),
         );
         // The accessors return the exact Arc instances the context was built
@@ -240,6 +252,23 @@ mod tests {
         assert!(
             Arc::ptr_eq(ctx.hotkeys(), &hotkeys),
             "hotkeys() must return the shared HotkeyManager"
+        );
+    }
+
+    #[test]
+    fn commands_accessor_returns_shared_registry() {
+        let commands = Arc::new(crate::command::CommandRegistry::new());
+        let ctx = ModuleContext::new(
+            Arc::new(EventBus::new()),
+            Arc::new(WindowManagerHandle::new()),
+            Arc::new(ConfigCenter::default()),
+            Arc::new(HotkeyManager::default()),
+            Arc::clone(&commands),
+            UiThreadProxy::new(),
+        );
+        assert!(
+            Arc::ptr_eq(ctx.commands(), &commands),
+            "commands() must return the shared CommandRegistry"
         );
     }
 

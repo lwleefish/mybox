@@ -19,6 +19,13 @@ parking_lot = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
+# Phase 3 (D-01): egui lives in core and is re-exported so every module reuses
+# ONE egui/egui-winit pair; fuzzy-matcher + pollster serve the palette's filter
+# and the async command runner (D-07) respectively.
+egui = { workspace = true }
+egui-winit = { workspace = true }
+fuzzy-matcher = { workspace = true }
+pollster = { workspace = true }
 
 # macOS: raise capture-overlay windows above the menu bar + Dock (see
 # `window::elevate_overlay_window`). Version pinned to the same objc2 line
