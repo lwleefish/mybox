@@ -9,7 +9,9 @@
 
 pub mod fonts;
 pub mod position;
+pub mod raster;
 pub mod session;
+pub mod ui;
 
 use std::sync::{Arc, OnceLock};
 
@@ -18,12 +20,14 @@ use mybox_core::command::CommandRegistry;
 use mybox_core::event::{EventFilter, EventPayload, FrameworkEvent};
 use mybox_core::log;
 use mybox_core::module::Module;
+use mybox_core::tiny_skia;
 use mybox_core::toml;
 use mybox_core::window::{WindowKind, WindowManagerHandle, WindowSpec};
+use mybox_core::winit;
 use mybox_core::{ConfigCenter, ModuleContext, UiThreadProxy};
 
 use position::PanelGeometry;
-use session::PaletteSession;
+use session::{PaletteSession, PaletteState};
 
 /// Command palette module: hotkey toggle + build-destroy window lifecycle.
 pub struct PaletteModule {
@@ -42,6 +46,8 @@ impl PaletteModule {
         if let Err(e) = fonts::install_cjk_fonts(&session.egui_ctx()) {
             log::warn!("palette: CJK font install failed ({e:#}) — ASCII fallback");
         }
+        // Dark fixed theme + card overrides, once, before the first frame.
+        ui::configure_egui_ctx(&session.egui_ctx());
         Self {
             session,
             ui: Arc::new(OnceLock::new()),
@@ -77,6 +83,7 @@ impl Module for PaletteModule {
         let session = Arc::clone(&self.session);
         let windows = ctx.windows().clone();
         let commands = ctx.commands().clone();
+        let ui_proxy = Arc::clone(&self.ui);
         ctx.on(
             EventFilter::kind("core", "hotkey.triggered"),
             Box::new(move |e| {
@@ -85,7 +92,7 @@ impl Module for PaletteModule {
                 {
                     if action == "toggle_palette" {
                         log::info!("palette: hotkey 'toggle_palette' triggered");
-                        toggle_palette(&session, &windows, &commands);
+                        toggle_palette(&session, &windows, &commands, &ui_proxy);
                     }
                 }
             }),
@@ -149,13 +156,14 @@ fn hotkey_from_config(config: &ConfigCenter) -> String {
 
 /// Toggle: visible → close; hidden → summon (D-06 + re-entrancy-safe).
 fn toggle_palette(
-    session: &PaletteSession,
+    session: &Arc<PaletteSession>,
     windows: &Arc<WindowManagerHandle>,
     commands: &Arc<CommandRegistry>,
+    ui_proxy: &Arc<OnceLock<UiThreadProxy>>,
 ) {
     if session.has_live_window() {
         close_palette(session, windows);
-    } else if let Err(e) = summon_palette(session, windows, commands) {
+    } else if let Err(e) = summon_palette(session, windows, commands, ui_proxy) {
         log::warn!("palette: summon failed: {e:#}");
     }
 }
@@ -163,29 +171,142 @@ fn toggle_palette(
 /// Summon: compute active-monitor geometry → snapshot the command list →
 /// allocate the framebuffer → enqueue Create.
 fn summon_palette(
-    session: &PaletteSession,
+    session: &Arc<PaletteSession>,
     windows: &Arc<WindowManagerHandle>,
     commands: &Arc<CommandRegistry>,
+    ui_proxy: &Arc<OnceLock<UiThreadProxy>>,
 ) -> anyhow::Result<()> {
     let all = commands.all();
-    // Placeholder height 560.0 — Task 4 replaces it with
-    // `ui::window_height(PaletteState::Idle, n)` (UI-SPEC geometry table).
-    let geometry = position::summon_geometry((600.0, 560.0))?;
+    // UI-SPEC geometry table: height adapts to the visible row count.
+    let height = ui::window_height(PaletteState::Idle, all.len());
+    let geometry = position::summon_geometry((ui::PANEL_WIDTH, height))?;
     session.summon(all);
     session.install_framebuffer(geometry.inner_size.0, geometry.inner_size.1);
-    windows.create(build_window_spec(geometry));
+    windows.create(build_window_spec(session, windows, ui_proxy, geometry));
     Ok(())
 }
 
-/// Build the Floating window spec for a palette window. `pub` so 03-02's
-/// `palette_checks` harness can reuse it; the render closures (on_event_win /
-/// on_draw) are wired in by Task 4.
-pub fn build_window_spec(geometry: PanelGeometry) -> WindowSpec {
+/// Build the Floating window spec with the full render chain:
+/// `on_event_win` runs the egui-winit frame loop (event translation → egui run
+/// → tessellate → `raster::paint` into the session framebuffer) and handles
+/// ESC close; `on_draw` blits the framebuffer into the core Pixmap before
+/// `present()`. `pub` so 03-02's `palette_checks` harness can reuse it.
+///
+/// The closures capture the injected `ui_proxy` (an `Arc<OnceLock<UiThreadProxy>>`):
+/// 03-01 does not consume it yet — 03-02's Enter-execute path reads it via
+/// `ui_proxy.get()`, so no closure construction changes are needed later.
+pub fn build_window_spec(
+    session: &Arc<PaletteSession>,
+    windows: &Arc<WindowManagerHandle>,
+    ui_proxy: &Arc<OnceLock<UiThreadProxy>>,
+    geometry: PanelGeometry,
+) -> WindowSpec {
+    let session = Arc::clone(session);
+    let windows = Arc::clone(windows);
+    let ui_proxy = Arc::clone(ui_proxy);
+    // One clone per closure (on_event_win and on_draw below).
+    let session_draw = Arc::clone(&session);
+
+    let on_event_win: Option<
+        Box<dyn Fn(&Arc<winit::window::Window>, &winit::event::WindowEvent) + Send + Sync>,
+    > = Some(Box::new(move |window, event| {
+        // RESEARCH Architecture Diagram left column, node by node. All
+        // egui-winit calls happen here on the main thread only
+        // (Anti-Patterns: never touch the winit State off the main thread).
+        use winit::event::{ElementState, KeyEvent, WindowEvent};
+        use winit::keyboard::{Key, NamedKey};
+
+        session.ensure_winit_state(window);
+
+        // 1. Translate the winit event into egui input.
+        let resp = session.with_winit_state_mut(|state| {
+            state
+                .as_mut()
+                .expect("ensure_winit_state ran")
+                .on_window_event(window, event)
+        });
+        // Pitfall 8: ControlFlow::Wait does not redraw on its own — request a
+        // redraw whenever egui asks for one.
+        if resp.repaint {
+            if let Some(id) = session.window_id() {
+                windows.redraw(id);
+            }
+        }
+
+        // PAL-05: ESC closes the panel (full keyboard mapping is 03-02).
+        if let WindowEvent::KeyboardInput {
+            event:
+                KeyEvent {
+                    logical_key: Key::Named(NamedKey::Escape),
+                    state: ElementState::Pressed,
+                    ..
+                },
+            ..
+        } = event
+        {
+            close_palette(&session, &windows);
+        }
+
+        // 2. Frame loop: run egui, rasterize into the session framebuffer.
+        if let WindowEvent::RedrawRequested = event {
+            let raw = session.with_winit_state_mut(|state| {
+                state
+                    .as_mut()
+                    .expect("ensure_winit_state ran")
+                    .take_egui_input(window)
+            });
+            let egui_ctx = session.egui_ctx();
+            let full_output = egui_ctx.run(raw, |ctx| ui::draw(ctx, &session));
+            session.apply_textures(full_output.textures_delta);
+            let primitives = egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+            session.with_framebuffer(|framebuffer| {
+                if let Some(framebuffer) = framebuffer {
+                    let textures = session.textures();
+                    raster::paint(
+                        framebuffer,
+                        &primitives,
+                        &textures,
+                        full_output.pixels_per_point,
+                    );
+                }
+            });
+            session.with_winit_state_mut(|state| {
+                state
+                    .as_mut()
+                    .expect("ensure_winit_state ran")
+                    .handle_platform_output(window, full_output.platform_output);
+            });
+        }
+
+        // Keep the injection alive for 03-02's execute path.
+        let _ = &ui_proxy;
+    }));
+
+    let on_draw: Option<Box<dyn Fn(&mut tiny_skia::PixmapMut, u32, u32) + Send + Sync>> =
+        Some(Box::new(move |pixmap, _w, _h| {
+            // Single-line blit of the palette framebuffer; handle_redraw calls
+            // this before present() (the Phase 2 chain).
+            session_draw.with_framebuffer(|framebuffer| {
+                if let Some(framebuffer) = framebuffer {
+                    pixmap.draw_pixmap(
+                        0,
+                        0,
+                        framebuffer.as_ref(),
+                        &tiny_skia::PixmapPaint::default(),
+                        tiny_skia::Transform::identity(),
+                        None,
+                    );
+                }
+            });
+        }));
+
     WindowSpec {
         kind: WindowKind::Floating,
         title: "mybox-palette".to_string(),
         inner_size: Some(geometry.inner_size),
         position: Some(geometry.position),
+        on_event_win,
+        on_draw,
         ..Default::default()
     }
 }
@@ -284,9 +405,10 @@ mod tests {
                 assert_eq!(spec.title, "mybox-palette");
                 assert!(spec.inner_size.is_some(), "palette must have a fixed size");
                 assert!(spec.position.is_some(), "palette must be positioned at the monitor center");
-                // Task 3: render closures not yet wired (Task 4 fills them).
-                assert!(spec.on_event_win.is_none());
-                assert!(spec.on_draw.is_none());
+                // Task 4: the full render chain is wired (egui frame loop +
+                // framebuffer blit).
+                assert!(spec.on_event_win.is_some(), "on_event_win frame loop must be wired");
+                assert!(spec.on_draw.is_some(), "on_draw blit must be wired");
             }
             other => panic!(
                 "expected Create, got {}",

@@ -180,6 +180,12 @@ impl PaletteSession {
         self.state.lock().unwrap().commands.clone()
     }
 
+    /// The current selection index (None in Idle — no highlight, Enter runs
+    /// the first command; UI-SPEC selection semantics).
+    pub fn selection(&self) -> Option<usize> {
+        self.state.lock().unwrap().selection
+    }
+
     /// The filtered index list (03-01: always the full command list).
     pub fn filtered(&self) -> Vec<usize> {
         self.state.lock().unwrap().filtered.clone()
