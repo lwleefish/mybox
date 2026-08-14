@@ -1,0 +1,18 @@
+[package]
+name = "mybox-palette"
+version = "0.1.0"
+edition = "2021"
+description = "Command palette module for the mybox desktop toolbox"
+
+[dependencies]
+# FRMW-02 boundary: egui/egui-winit/fuzzy-matcher/pollster come through the
+# mybox-core re-exports (D-01) — no direct deps on them. xcap (monitor
+# enumeration) and objc2-app-kit (cursor position) are the only third-party
+# crates here, same status as capture's xcap/arboard/ab_glyph.
+mybox-core = { path = "../../mybox-core" }
+xcap = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# NSEvent::mouseLocation for active-monitor centering (0.3.2 — xcap's objc2
+# line; never interop'd with winit's objc2 objects, so no version conflict).
+objc2-app-kit = { workspace = true }

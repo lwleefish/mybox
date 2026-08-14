@@ -4,7 +4,7 @@
 # See .planning/phases/01-framework/01-RESEARCH.md §3 for the crate layout rationale.
 
 [workspace]
-members = ["crates/mybox-core", "crates/mybox-app", "crates/modules/test", "crates/modules/capture"]
+members = ["crates/mybox-core", "crates/mybox-app", "crates/modules/test", "crates/modules/capture", "crates/modules/palette"]
 resolver = "2"
 
 # Version-locked per RESEARCH §1 (verified 2026-08 against crates.io sources).

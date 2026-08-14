@@ -46,5 +46,6 @@ fn main() -> anyhow::Result<()> {
     // module() returns Result — a duplicate module id bubbles up here (N1).
     builder.module(Box::new(mybox_test::TestModule))?;
     builder.module(Box::new(mybox_capture::CaptureModule::new()))?;
+    builder.module(Box::new(mybox_palette::PaletteModule::new()))?;
     builder.build()?.run()
 }
