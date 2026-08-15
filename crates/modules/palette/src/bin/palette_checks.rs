@@ -13,7 +13,7 @@
 //! guards against hangs; the driver is re-entered on a 50ms poll (finalize
 //! hops arrive via `AppEvent::Ui`, so the driver must never block the loop).
 //!
-//! Usage: `palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close|glyph_shape|position_stable_on_filter|hover_click_alignment|ctrl_pn_navigation>`
+//! Usage: `palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close|glyph_shape|position_stable_on_filter|hover_click_alignment|ctrl_pn_navigation|ime_commit_updates_input>`
 //! Exit code 0 on success, 1 on failure, 2 on bad usage.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1720,6 +1720,162 @@ fn check_ctrl_pn_navigation() -> Result<(), String> {
     run_harness(harness, &ui_proxy)
 }
 
+// ─── Check 10: Ime Commit → input → filter + explicit IME flag (GAP-7,
+//     03-08) ──────────────────────────────────────────────────────────────────
+
+/// Real-window IME commit probe (PAL-03 / GAP-7, 03-08).
+///
+/// Injects synthetic `WindowEvent::Ime` events (`Ime::Preedit` / `Ime::Commit`
+/// — winit exposes these for external construction, unlike `KeyEvent`)
+/// through the real window + the production `on_event_win` closure, so the
+/// full chain egui-winit translation → egui `Event::Ime` → TextEdit insert →
+/// `input_resp.changed()` → `session.set_input` runs exactly as production
+/// drives it:
+///
+/// - stage 0: baseline Idle frame (the first production-closure invocation
+///   triggers `ensure_winit_state` — assert the GAP-7 explicit IME-enable
+///   flag was set through the REAL closure, this probe's core coverage
+///   point); inject `Ime::Preedit("测", None)` (the OS sends Preedit before
+///   Commit during pinyin composition).
+/// - stage 1: process the Preedit frame; inject `Ime::Commit("截图")`.
+/// - stage 2: commit frame — assert the committed Chinese text reached
+///   `session.input` ("截图"), moved the state to Filtering, and filtered to
+///   [0] (capture.start's name tier). Then `set_input("tuichu")` asserts the
+///   GAP-7 no-IME prefix-discovery path at the session level (the pinyin
+///   keyword alias hits builtin.quit → filtered [1]). ESC closes.
+/// - stage 3: poll for the paired Destroy + Hidden residue assertions.
+///
+/// Coverage statement (kept honest): the probe injects synthetic Ime events
+/// and covers the winit event → egui-winit → TextEdit → session chain plus
+/// the ime_allowed flag. The OS input-method composition window (candidate
+/// window) appearance/interaction can only be re-verified by human UAT
+/// test 10 on the desktop.
+fn check_ime_commit_updates_input() -> Result<(), String> {
+    use mybox_core::winit::event::Ime;
+    use mybox_core::winit::keyboard::{Key, NamedKey};
+
+    let session = Arc::new(PaletteSession::new());
+    let handle = Arc::new(WindowManagerHandle::new());
+    let ui_proxy = Arc::new(OnceLock::new());
+    // 2 commands mirroring the production inventory: capture.start (name
+    // "开始截图", keywords incl. "jietu") + builtin.quit (name "退出应用",
+    // keywords incl. the Task-1 GAP-7 pinyin alias "tuichu").
+    let registry = registry_with(vec![
+        fake_command(
+            "capture.start",
+            "开始截图",
+            &["截图", "capture", "screen", "jietu"],
+            ok_runner(),
+        ),
+        fake_command(
+            "builtin.quit",
+            "退出应用",
+            &["退出", "quit", "exit", "tuichu"],
+            ok_runner(),
+        ),
+    ]);
+    summon_palette(&session, &handle, &registry, &ui_proxy).map_err(|e| format!("summon: {e}"))?;
+    let spec = expect_create(&handle)?;
+
+    let s = Arc::clone(&session);
+    let ui_lock = Arc::clone(&ui_proxy);
+    let mut stage = 0u8;
+    let harness = PaletteHarness::new(
+        Arc::clone(&session),
+        Arc::clone(&handle),
+        spec,
+        Box::new(move |h, _el, event| {
+            let WindowEvent::RedrawRequested = event else { return Ok(()); };
+            match stage {
+                0 => {
+                    // First frame: the first production-closure invocation
+                    // triggers ensure_winit_state — the GAP-7 explicit IME
+                    // enable must have happened through the real closure.
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    if h.non_background_pixels() == 0 {
+                        return Err("Idle frame must produce non-background pixels".into());
+                    }
+                    if !s.ime_allowed() {
+                        return Err(
+                            "GAP-7: the first window event must set the ime_allowed flag".into(),
+                        );
+                    }
+                    // Start an IME composition (the OS sends Preedit before
+                    // Commit during pinyin composition).
+                    h.inject(WindowEvent::Ime(Ime::Preedit("测".to_string(), None)))?;
+                    stage = 1;
+                    Ok(())
+                }
+                1 => {
+                    // Frame that processes the Preedit, then commit.
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    h.inject(WindowEvent::Ime(Ime::Commit("截图".to_string())))?;
+                    stage = 2;
+                    Ok(())
+                }
+                2 => {
+                    // Commit frame: egui-winit → egui Event::Ime → TextEdit
+                    // insert → input_resp.changed → session.set_input. The
+                    // committed Chinese text must have reached the session
+                    // and triggered filtering.
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    if s.input() != "截图" {
+                        return Err(format!(
+                            "GAP-7: Ime Commit must reach session.input, got {:?}",
+                            s.input()
+                        ));
+                    }
+                    if s.state() != PaletteState::Filtering {
+                        return Err(format!(
+                            "committed text must transition to Filtering, got {:?}",
+                            s.state()
+                        ));
+                    }
+                    if s.filtered() != vec![0] {
+                        return Err(format!(
+                            "\"截图\" must filter to [0] (capture.start), got {:?}",
+                            s.filtered()
+                        ));
+                    }
+                    // GAP-7 prefix discovery at the session level: the pinyin
+                    // keyword alias hits the Chinese builtin without an IME.
+                    s.set_input("tuichu");
+                    if s.filtered() != vec![1] {
+                        return Err(format!(
+                            "\"tuichu\" must hit builtin.quit via the pinyin keyword, got {:?}",
+                            s.filtered()
+                        ));
+                    }
+                    press_key(&s, &h.handle, &ui_lock, Key::Named(NamedKey::Escape));
+                    stage = 3;
+                    Ok(())
+                }
+                3 => {
+                    match h.handle.try_recv() {
+                        Some(WindowRequest::Destroy(id)) => {
+                            if Some(id) != h.created_id {
+                                return Err(format!(
+                                    "ESC must destroy the created window ({id} != {:?})",
+                                    h.created_id
+                                ));
+                            }
+                        }
+                        // Drain Redraw stragglers; keep polling.
+                        _ => return Ok(()),
+                    }
+                    if s.state() != PaletteState::Hidden {
+                        return Err("ESC must move the session to Hidden".into());
+                    }
+                    h.pass();
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
+        }),
+    );
+    run_harness(harness, &ui_proxy)
+}
+
 // ─── Entry point (exit 0 ok / 1 fail / 2 usage — 02-04 discipline) ──────────
 
 fn main() {
@@ -1734,9 +1890,10 @@ fn main() {
         "position_stable_on_filter" => check_position_stable_on_filter(),
         "hover_click_alignment" => check_hover_click_alignment(),
         "ctrl_pn_navigation" => check_ctrl_pn_navigation(),
+        "ime_commit_updates_input" => check_ime_commit_updates_input(),
         _ => {
             eprintln!(
-                "usage: palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close|glyph_shape|position_stable_on_filter|hover_click_alignment|ctrl_pn_navigation>"
+                "usage: palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close|glyph_shape|position_stable_on_filter|hover_click_alignment|ctrl_pn_navigation|ime_commit_updates_input>"
             );
             std::process::exit(2);
         }

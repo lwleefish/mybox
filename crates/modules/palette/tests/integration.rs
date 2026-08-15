@@ -136,3 +136,18 @@ fn palette_hover_click_alignment() {
 fn palette_ctrl_pn_navigation() {
     run_check("ctrl_pn_navigation");
 }
+
+/// Test 10 — GAP-7 regression (03-08, PAL-03): on a real window, synthetic
+/// `Ime::Preedit`/`Ime::Commit` events drive the full egui-winit → egui
+/// `Event::Ime` → TextEdit → `session.set_input` chain. The first window event
+/// must set the explicit IME-enable flag (`ime_allowed` — GAP-7's code-level
+/// fix); the committed Chinese text "截图" must reach `session.input`, move the
+/// state to Filtering and filter to [0] (capture.start); `set_input("tuichu")`
+/// must hit builtin.quit via the new pinyin keyword alias (the no-IME
+/// prefix-discovery path → filtered [1]); ESC closes with a paired Destroy.
+/// The OS candidate-window appearance is re-verified by human UAT test 10.
+#[test]
+#[ignore]
+fn palette_ime_commit_updates_input() {
+    run_check("ime_commit_updates_input");
+}
