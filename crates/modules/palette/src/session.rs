@@ -79,6 +79,12 @@ struct SessionInner {
     /// writes it via `set_modifiers` (main thread only) and the key router
     /// reads it via `modifiers` (any thread).
     modifiers: winit::keyboard::ModifiersState,
+    /// True after the palette window explicitly requested IME input
+    /// (GAP-7). Set once in `ensure_winit_state` — the panel's only purpose
+    /// is text input, so the first event enables the OS IME channel
+    /// immediately instead of waiting for egui-winit's multi-frame
+    /// focus→PlatformOutput.ime sequence.
+    ime_allowed: bool,
 }
 
 /// Cloneable handle to the shared palette session.
@@ -111,6 +117,7 @@ impl PaletteSession {
                 winit_state: None,
                 focus_requested: false,
                 modifiers: winit::keyboard::ModifiersState::empty(),
+                ime_allowed: false,
             })),
             egui_ctx: Arc::new(std::sync::Mutex::new(egui::Context::default())),
         }
@@ -231,6 +238,14 @@ impl PaletteSession {
     /// is returned by value.
     pub fn modifiers(&self) -> winit::keyboard::ModifiersState {
         self.state.lock().unwrap().modifiers
+    }
+
+    /// Whether the palette window has explicitly requested IME input
+    /// (GAP-7). Set once by `ensure_winit_state` (the first window event);
+    /// asserted by the `ime_commit_updates_input` E2E probe through the real
+    /// production closure.
+    pub fn ime_allowed(&self) -> bool {
+        self.state.lock().unwrap().ime_allowed
     }
 
     /// The geometry revision counter — the deterministic height-sync trigger
@@ -444,19 +459,46 @@ impl PaletteSession {
     }
 
     /// Lazily construct the egui-winit `State` for the given window (created
-    /// on the first event — Pattern 2).
+    /// on the first event — Pattern 2) and explicitly enable the OS IME
+    /// channel on that same first call (GAP-7).
+    ///
+    /// GAP-7 root cause: egui-winit's own `set_ime_allowed` depends on a
+    /// multi-frame sequence — "TextEdit gains focus → the NEXT frame's
+    /// `PlatformOutput.ime` → handle_platform_output → set_ime_allowed"
+    /// (egui-winit lib.rs:851). Under the real desktop first-frame focus race
+    /// the OS candidate window never appears. The palette window's only
+    /// purpose is text input, so this method requests IME input explicitly
+    /// the first time the window ever receives an event — the timing
+    /// dependency is gone. egui-winit's later focus-driven
+    /// `set_ime_allowed(false/true)` calls are preserved (disabling IME while
+    /// the Executing state disables input is correct).
+    ///
+    /// The winit call happens OUTSIDE the state lock (no lock held across a
+    /// winit call), gated once by the `ime_allowed` flag.
     pub fn ensure_winit_state(&self, window: &Arc<winit::window::Window>) {
-        let mut inner = self.state.lock().unwrap();
-        if inner.winit_state.is_none() {
-            let ctx = self.egui_ctx.lock().unwrap().clone();
-            inner.winit_state = Some(egui_winit::State::new(
-                ctx,
-                egui::ViewportId::ROOT,
-                window.as_ref(),
-                None,
-                None,
-                None,
-            ));
+        let enable_ime = {
+            let mut inner = self.state.lock().unwrap();
+            if inner.winit_state.is_none() {
+                let ctx = self.egui_ctx.lock().unwrap().clone();
+                inner.winit_state = Some(egui_winit::State::new(
+                    ctx,
+                    egui::ViewportId::ROOT,
+                    window.as_ref(),
+                    None,
+                    None,
+                    None,
+                ));
+            }
+            if !inner.ime_allowed {
+                inner.ime_allowed = true;
+                true
+            } else {
+                false
+            }
+        };
+        if enable_ime {
+            window.set_ime_allowed(true);
+            log::debug!("palette: IME allowed on the palette window (GAP-7)");
         }
     }
 
