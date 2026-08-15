@@ -56,6 +56,14 @@ struct SessionInner {
     pending_close: bool,
     /// Incremented per summon; guards stale runner completions (Pitfall 3).
     generation: u64,
+    /// Geometry revision: incremented by every state-machine transition that
+    /// changes the target window height (summon / set_input / set_executing
+    /// success / finalize-Err). The frame loop compares this counter against
+    /// its last-seen value — a deterministic trigger that catches transitions
+    /// occurring OUTSIDE a frame (Enter→Executing arrives in a KeyboardInput
+    /// event, finalize-Err hops in via UiThreadProxy), which the old in-frame
+    /// prev/next snapshot comparison could never observe (WR-01 root cause).
+    geometry_revision: u64,
     executing_id: Option<&'static str>,
     error: Option<String>,
     framebuffer: Option<tiny_skia::Pixmap>,
@@ -87,6 +95,7 @@ impl PaletteSession {
                 window_id: None,
                 pending_close: false,
                 generation: 0,
+                geometry_revision: 0,
                 executing_id: None,
                 error: None,
                 framebuffer: None,
@@ -100,9 +109,12 @@ impl PaletteSession {
 
     /// Summon the palette: snapshot the command list, reset input/selection,
     /// bump the generation counter, move to Idle. Returns the new generation.
+    /// Also bumps the geometry revision (a fresh window gets fresh geometry —
+    /// the frame loop must re-sync the height for the new command count).
     pub fn summon(&self, commands: Vec<Command>) -> u64 {
         let mut inner = self.state.lock().unwrap();
         inner.generation += 1;
+        inner.geometry_revision += 1;
         inner.state = PaletteState::Idle;
         inner.input.clear();
         inner.selection = None;
@@ -193,6 +205,15 @@ impl PaletteSession {
         self.state.lock().unwrap().generation
     }
 
+    /// The geometry revision counter — the deterministic height-sync trigger
+    /// (WR-01 fix). Incremented by every geometry-affecting state-machine
+    /// transition (summon / set_input / set_executing success /
+    /// finalize-Err); the frame loop compares it against its last-seen value
+    /// and calls `sync_window_geometry` on any change.
+    pub fn geometry_revision(&self) -> u64 {
+        self.state.lock().unwrap().geometry_revision
+    }
+
     pub fn input(&self) -> String {
         self.state.lock().unwrap().input.clone()
     }
@@ -210,6 +231,12 @@ impl PaletteSession {
     /// every input change resets the highlight).
     pub fn set_input(&self, s: &str) {
         let mut inner = self.state.lock().unwrap();
+        // Geometry revision bump FIRST: the input change re-ranks the filtered
+        // list and changes the target window height. Production only calls
+        // this when the TextEdit actually changed (ui.rs `input_resp.changed()`
+        // guard); headless direct calls are safe — the frame-loop sync is
+        // deduped by the `last_height` gate.
+        inner.geometry_revision += 1;
         let truncated: String = s.chars().take(filter::MAX_QUERY_LEN).collect();
         inner.input = truncated.clone();
         if truncated.trim().is_empty() {
@@ -297,9 +324,42 @@ impl PaletteSession {
         self.state.lock().unwrap().window_id
     }
 
-    /// Allocate (or replace) the render framebuffer.
+    /// Allocate (or replace) the render framebuffer at summon (the initial
+    /// allocation path). Runtime resizes go through `resize_framebuffer` —
+    /// every height sync keeps the framebuffer matching the window's physical
+    /// size (WR-02 fix).
     pub fn install_framebuffer(&self, w: u32, h: u32) {
         self.state.lock().unwrap().framebuffer = tiny_skia::Pixmap::new(w, h);
+    }
+
+    /// Resize (or allocate) the render framebuffer to `w`×`h` physical pixels
+    /// — the runtime companion to `install_framebuffer` (WR-02 fix).
+    ///
+    /// WR-02 root cause: the framebuffer used to be allocated exactly once at
+    /// summon, so after the window GREW (Executing adds the 32px status line:
+    /// `112+48·n > 80+48·n`) the new region had nothing to draw. Every height
+    /// sync calls this so the framebuffer always covers the window's physical
+    /// size.
+    ///
+    /// Same-size calls keep the existing `Pixmap` instance (no per-frame
+    /// allocation churn). A failed allocation warns and KEEPS the old buffer
+    /// (never panics — the old buffer still displays safely, clipped by the
+    /// tiny-skia blit).
+    pub fn resize_framebuffer(&self, w: u32, h: u32) {
+        let mut inner = self.state.lock().unwrap();
+        let needs_resize = match &inner.framebuffer {
+            None => true,
+            Some(fb) => fb.width() != w || fb.height() != h,
+        };
+        if !needs_resize {
+            return;
+        }
+        match tiny_skia::Pixmap::new(w, h) {
+            Some(pixmap) => inner.framebuffer = Some(pixmap),
+            None => log::warn!(
+                "palette: framebuffer allocation failed for {w}x{h} — keeping the previous buffer"
+            ),
+        }
     }
 
     /// Lock the session and hand `f` the framebuffer (the on_draw blit path).
@@ -402,6 +462,11 @@ impl PaletteSession {
         if gen != inner.generation {
             return false;
         }
+        // Successful transition only: the Executing status line adds 32px
+        // (112+48·n > 80+48·n) — bump the geometry revision so the frame loop
+        // grows the window. Rejected duplicate/stale calls return above and
+        // never bump (no geometry change, no sync needed).
+        inner.geometry_revision += 1;
         inner.state = PaletteState::Executing;
         inner.executing_id = Some(id);
         true
@@ -436,6 +501,12 @@ impl PaletteSession {
             Err(e) => {
                 inner.state = PaletteState::Error;
                 inner.error = Some(format!("{e:#}"));
+                // Error shrinks the window to the fixed 144 — bump the
+                // revision so the frame loop syncs the shrink (WR-01: this
+                // transition arrives via a UiThreadProxy hop, invisible to
+                // in-frame snapshots). The Ok branch needs no bump: the
+                // window is destroyed, nothing to resize.
+                inner.geometry_revision += 1;
                 None
             }
         }
@@ -824,6 +895,112 @@ mod tests {
         assert_eq!(s.finalize(gen, Ok(())), None, "wrong state → no-op");
         assert_eq!(s.state(), PaletteState::Hidden);
         assert!(!s.has_live_window());
+    }
+
+    #[test]
+    fn geometry_revision_bumps_on_geometry_affecting_transitions() {
+        // The revision counter is the deterministic height-sync trigger
+        // (WR-01): it must advance ONLY on the four geometry-affecting
+        // transitions — summon, set_input, set_executing success,
+        // finalize-Err — and stay put for everything else.
+        let s = PaletteSession::new();
+        assert_eq!(s.geometry_revision(), 0, "fresh session starts at zero");
+        let gen = s.summon(vec![sample_command("a")]);
+        assert_eq!(s.geometry_revision(), 1, "summon bumps the revision");
+        s.set_input("a");
+        assert_eq!(s.geometry_revision(), 2, "set_input bumps the revision");
+        assert!(s.set_executing(gen, "a"));
+        assert_eq!(s.geometry_revision(), 3, "set_executing success bumps the revision");
+        assert_eq!(s.finalize(gen, Err(mybox_core::anyhow::anyhow!("x"))), None);
+        assert_eq!(s.geometry_revision(), 4, "finalize Err bumps the revision");
+        // Ok path: re-summon to reset the generation, execute, complete Ok —
+        // the window is about to be destroyed, so no height sync (no bump).
+        let gen2 = s.summon(vec![sample_command("a")]);
+        assert!(s.set_executing(gen2, "a"));
+        let revision_before_ok = s.geometry_revision();
+        assert_eq!(s.finalize(gen2, Ok(())), None, "no window id recorded — pending close");
+        assert_eq!(
+            s.geometry_revision(),
+            revision_before_ok,
+            "finalize Ok does not bump the revision"
+        );
+        // Navigation and close are not geometry-affecting.
+        s.summon(vec![sample_command("a"), sample_command("b")]);
+        let revision_before_move = s.geometry_revision();
+        s.move_selection(1);
+        assert_eq!(
+            s.geometry_revision(),
+            revision_before_move,
+            "move_selection does not bump the revision"
+        );
+        let revision_before_close = s.geometry_revision();
+        let _ = s.close();
+        assert_eq!(
+            s.geometry_revision(),
+            revision_before_close,
+            "close does not bump the revision"
+        );
+    }
+
+    #[test]
+    fn set_executing_rejected_does_not_bump_revision() {
+        let s = PaletteSession::new();
+        let gen = s.summon(vec![sample_command("a")]);
+        let revision = s.geometry_revision();
+        assert!(s.set_executing(gen, "a"));
+        assert_eq!(s.geometry_revision(), revision + 1, "successful transition bumps once");
+        // Re-entrancy: a second set_executing while Executing is rejected (D-04)
+        // and must not bump the revision (no geometry change).
+        assert!(!s.set_executing(gen, "a"), "Executing must not re-execute");
+        assert_eq!(
+            s.geometry_revision(),
+            revision + 1,
+            "rejected duplicate set_executing does not bump"
+        );
+        // A stale generation is rejected without a bump too.
+        let gen2 = s.summon(vec![sample_command("a")]);
+        let revision2 = s.geometry_revision();
+        assert!(!s.set_executing(gen, "a"), "stale generation must not execute");
+        assert_eq!(
+            s.geometry_revision(),
+            revision2,
+            "stale set_executing does not bump"
+        );
+        let _ = gen2;
+    }
+
+    #[test]
+    fn resize_framebuffer_grows_shrinks_and_keeps_same_size() {
+        let s = PaletteSession::new();
+        s.install_framebuffer(100, 100);
+        s.resize_framebuffer(200, 200);
+        s.with_framebuffer(|fb| {
+            let fb = fb.as_ref().expect("framebuffer installed");
+            assert_eq!(fb.width(), 200, "grow to 200 wide");
+            assert_eq!(fb.height(), 200, "grow to 200 tall");
+        });
+        s.resize_framebuffer(50, 50);
+        s.with_framebuffer(|fb| {
+            let fb = fb.as_ref().expect("framebuffer installed");
+            assert_eq!(fb.width(), 50, "shrink to 50 wide");
+            assert_eq!(fb.height(), 50, "shrink to 50 tall");
+        });
+        // Same size: the Pixmap instance must be preserved (zero allocation).
+        let ptr_before = s.with_framebuffer(|fb| fb.as_ref().map(|p| p.data().as_ptr()));
+        s.resize_framebuffer(50, 50);
+        let ptr_after = s.with_framebuffer(|fb| fb.as_ref().map(|p| p.data().as_ptr()));
+        assert_eq!(
+            ptr_before, ptr_after,
+            "same-size resize must keep the existing Pixmap instance"
+        );
+        // Allocating with no prior framebuffer installs a fresh one (the
+        // defensive path — summon normally installs first).
+        let s2 = PaletteSession::new();
+        s2.resize_framebuffer(30, 40);
+        s2.with_framebuffer(|fb| {
+            let fb = fb.as_ref().expect("allocation on first call");
+            assert_eq!((fb.width(), fb.height()), (30, 40));
+        });
     }
 
     /// Build a full FontImage delta for `id`.
