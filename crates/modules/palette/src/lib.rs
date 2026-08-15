@@ -281,6 +281,14 @@ pub fn build_window_spec(
             let textures = session.textures();
             session.with_framebuffer(|framebuffer| {
                 if let Some(framebuffer) = framebuffer {
+                    // Each frame repaints the full card, but the card only
+                    // covers the CURRENT egui screen rect — after a geometry
+                    // change (Filtering→Empty shrinks the window) rows outside
+                    // the new rect would otherwise keep stale glyphs from the
+                    // previous layout. Clear to the card background so the
+                    // framebuffer always represents exactly this frame (the
+                    // opaque #202020 full-bleed window contract, 03-PATTERNS).
+                    framebuffer.fill(tiny_skia::Color::from_rgba8(0x20, 0x20, 0x20, 0xFF));
                     raster::paint(
                         framebuffer,
                         &primitives,
