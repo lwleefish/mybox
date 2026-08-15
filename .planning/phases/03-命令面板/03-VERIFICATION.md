@@ -1,7 +1,7 @@
 ---
 phase: 03-命令面板
 verified: 2026-08-15T02:01:18Z
-status: human_needed
+status: gaps_found
 score: 17/17 must-haves verified
 overrides_applied: 0
 deferred:
@@ -189,7 +189,10 @@ Roadmap 成功标准（5）与 PLAN must_haves（03-01 六条 + 03-02 六条）�
 
 ### Gaps Summary
 
-**无阻断缺口（0 BLOCKER）。** 17/17 must-haves 全部在代码中实现、接线完整、数据流真实，209 单测 + 4 项 E2E 子进程检查全部通过（E2E 本人实跑两次全绿）。
+**2 项人工验证失败（用户实测 2026-08-15）。** 17/17 must-haves 代码层全部实现、接线完整，209 单测 + 4 项 E2E 子进程检查全部通过；但真实桌面测试暴露两个运行期缺陷：
+
+- **GAP-1（BLOCKER）：热键重复唤出失败**——第一次唤出正常，第二次及之后面板一闪而过（立即关闭）。疑似建销生命周期/pending_close 配对缺陷（真机时序与 headless 测试差异）。
+- **GAP-2（BLOCKER）：文字全部渲染为灰色块**——窗口内所有文字（含中文命令名）为灰色方块，字形无法识别。疑似字体纹理/光栅化路径缺陷（CJK 字形未进入字体图集或纹理采样失败）。
 
 非阻断事项：
 - **REQUIREMENTS.md 陈旧（WARNING）**：PAL-01/PAL-02 状态未同步为 Complete（实现证据确凿）。
