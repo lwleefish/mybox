@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 03-07-PLAN.md
-last_updated: "2026-08-15T08:34:24.040Z"
+stopped_at: Completed 03-08-PLAN.md
+last_updated: "2026-08-15T08:44:07.670Z"
 last_activity: 2026-08-15
 progress:
   total_phases: 4
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 16
-  completed_plans: 14
-  percent: 50
+  completed_plans: 16
+  percent: 75
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 03 (命令面板) — EXECUTING
-Plan: 7 of 8
+Plan: 8 of 8
 Status: Ready to execute
 Last activity: 2026-08-15
 
-Progress: [█████████░] 88%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -58,6 +58,7 @@ Progress: [█████████░] 88%
 | Phase 03-命令面板 P05 | 12 min | 3 tasks | 4 files |
 | Phase 03-命令面板 P06 | 22 min | 3 tasks | 4 files |
 | Phase 03-命令面板 P07 | 26 min | 3 tasks | 4 files |
+| Phase 03-命令面板 P08 | 5 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -85,6 +86,9 @@ Recent decisions affecting current work:
 - [Phase 03-命令面板]: 输入区光标改确定性：卡片级 item_spacing.y=0 + allocate_rect 预留 48px + TextEdit 放入 new_child（不推进父光标）——消除 TextEdit 固有高度（~37px）造成的打包漂移
 - [Phase ?]: 修饰键状态经 WindowEvent::ModifiersChanged 事件流跟踪存入 session（GAP-6 修复）：winit 0.30 KeyEvent 无 modifiers 字段，Ctrl+P/N 判定所需状态只能经独立事件流获取；summon 重置防跨窗口残留
 - [Phase ?]: on_palette_key 路由增加 modifiers 参数、Ctrl+P/N 守卫臂等价 move_selection(∓1)：无 Ctrl 守卫不满足返回 false、字符透传 TextEdit；Error 态任意键关闭语义保持
+- [Phase 03-命令面板]: IME 显式开启（GAP-7 输入子问题）：面板窗口首次事件即 window.set_ime_allowed(true)（ime_allowed 标志一次生效），消除 egui-winit 依赖 TextEdit 聚焦后帧 PlatformOutput.ime 的多帧时序——真实桌面首帧竞态下 OS 候选窗不出现；egui-winit 后续按焦点变化的 set_ime_allowed(false/true) 行为保留 — GAP-7 根因：egui-winit lib.rs:851 的 set_ime_allowed 依赖多帧时序；面板唯一用途是文本输入，首次事件显式开启消除时序依赖
+- [Phase 03-命令面板]: 拼音 keywords 覆盖全部内置命令（GAP-7 前缀发现子问题）：tuichu/peizhi/chongqi/rizhi 与 capture 既有 jietu 同机制（关键词梯队），无 IME 场景下用户可用拼音命中中文命令 — fuzzy-matcher 关键词梯队天然支持，纯数据扩展零代码路径变化；UI-SPEC 命令清单 Suggested keywords 为非锁定枚举
+- [Phase 03-命令面板]: SPEC 边界未扩大：无自研 IME 组合输入特殊处理、无拼音转换引擎；显式开启系统 IME 与 keywords 纯数据均为既有机制，03-SPEC/03-CONTEXT 不改动 — SPEC 排除的只是中文 IME 组合输入特殊处理；本计划只显式开启系统 IME（RESEARCH Anti-Patterns 明示标准路径）与使用既有 keywords 数据字段
 
 ### Pending Todos
 
@@ -114,6 +118,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-15T08:34:24.027Z
-Stopped at: Completed 03-07-PLAN.md
+Last session: 2026-08-15T08:44:07.659Z
+Stopped at: Completed 03-08-PLAN.md
 Resume file: None

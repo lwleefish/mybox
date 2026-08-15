@@ -131,7 +131,7 @@ Plans:
 
 **Wave 8** *(gap closure — blocked on Wave 7, shared files)*
 
-- [ ] 03-08: GAP-7 修复——中文输入（IME 显式开启 + 内置命令拼音 keywords + E2E ime_commit_updates_input 探针）
+- [x] 03-08: GAP-7 修复——中文输入（IME 显式开启 + 内置命令拼音 keywords + E2E ime_commit_updates_input 探针）
 
 ### Phase 4: 跨平台完善
 
@@ -162,5 +162,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 |-------|----------------|--------|-----------|
 | 1. 框架核心 | 4/4 | Complete   | 2026-08-12 |
 | 2. 截图模块 | 4/4 | Complete   | 2026-08-13 |
-| 3. 命令面板 | 5/8 | In Progress|  |
+| 3. 命令面板 | 8/8 | Complete   | 2026-08-15 |
 | 4. 跨平台完善 | 0/2 | Not started | - |
