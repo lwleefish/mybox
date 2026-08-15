@@ -13,7 +13,7 @@
 //! guards against hangs; the driver is re-entered on a 50ms poll (finalize
 //! hops arrive via `AppEvent::Ui`, so the driver must never block the loop).
 //!
-//! Usage: `palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close>`
+//! Usage: `palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close|glyph_shape|position_stable_on_filter>`
 //! Exit code 0 on success, 1 on failure, 2 on bad usage.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -143,6 +143,22 @@ impl PaletteHarness {
                 .count(),
             None => 0,
         })
+    }
+
+    /// The live window's outer position in physical px (top-left origin).
+    fn window_outer_position(&self) -> Result<(i32, i32), String> {
+        let window = self.window.as_ref().ok_or("window not realized")?;
+        window
+            .outer_position()
+            .map(|p| (p.x, p.y))
+            .map_err(|e| format!("outer_position: {e}"))
+    }
+
+    /// The live window's inner size in physical px.
+    fn window_inner_size(&self) -> Result<(u32, u32), String> {
+        let window = self.window.as_ref().ok_or("window not realized")?;
+        let size = window.inner_size();
+        Ok((size.width, size.height))
     }
 
     /// Run the real renderer chain (draw + present) for the current window —
@@ -1074,6 +1090,228 @@ fn check_glyph_shape() -> Result<(), String> {
     run_harness(harness, &ui_proxy)
 }
 
+// ─── Check 7: position stays fixed across filter shrink / restore / Executing
+//     growth (GAP-3 + WR-01/WR-02 regression, 03-05) ─────────────────────────
+
+/// Assert the session framebuffer covers the full window physical size
+/// (WR-02 regression): width = `ui::PANEL_WIDTH`·scale, height = `logical_h`·scale.
+fn assert_framebuffer_covers(h: &PaletteHarness, scale: f64, logical_h: f32) -> Result<(), String> {
+    let (w, hgt) = h.session.with_framebuffer(|fb| match fb {
+        Some(p) => (p.width(), p.height()),
+        None => (0, 0),
+    });
+    let expected_w = (mybox_palette::ui::PANEL_WIDTH as f64 * scale).round() as u32;
+    let expected_h = (f64::from(logical_h) * scale).round() as u32;
+    if w != expected_w || hgt != expected_h {
+        return Err(format!(
+            "WR-02 regression: framebuffer {w}x{hgt} does not cover the window {expected_w}x{expected_h}"
+        ));
+    }
+    Ok(())
+}
+
+/// Real-window position-stability probe (PAL-03 / GAP-3 + WR-01/WR-02, 03-05).
+///
+/// Drives the production `on_event_win` frame loop on a real window through
+/// three geometry-affecting stages — (1) filter shrink: `set_input("alpha
+/// one")` filters 5 commands down to 1 (height 320→128 logical); (2) input
+/// restore: `set_input("")` grows back to 5 (128→320); (3) Executing growth:
+/// the out-of-frame `set_executing` transition adds the 32px status line
+/// (320→352). At every stage the probe asserts, against the WINDOW SERVER's
+/// view: the outer position equals the summon origin EXACTLY (GAP-3: the old
+/// re-centering pushed the panel down on shrink) and the session framebuffer
+/// covers the full window physical size (WR-02: the old once-only allocation
+/// left growth regions undrawn).
+///
+/// Coverage statement (kept honest): the probe drives the real window and the
+/// real on_event_win closure — `request_inner_size`/`resize_framebuffer` are
+/// exercised exactly as production calls them. The OS-level "visually does
+/// not move" truth is re-verified by human UAT test 6 on the desktop.
+fn check_position_stable_on_filter() -> Result<(), String> {
+    let session = Arc::new(PaletteSession::new());
+    let handle = Arc::new(WindowManagerHandle::new());
+    let ui_proxy = Arc::new(OnceLock::new());
+    // 5 fake commands whose names guarantee `set_input("alpha one")` hits ONLY
+    // c0 ("Alpha One") — no other name/description contains the query.
+    let registry = registry_with(vec![
+        fake_command("c0", "Alpha One", &[], ok_runner()),
+        fake_command("c1", "Beta Two", &[], ok_runner()),
+        fake_command("c2", "Gamma Three", &[], ok_runner()),
+        fake_command("c3", "Delta Four", &[], ok_runner()),
+        fake_command("c4", "Epsilon Five", &[], ok_runner()),
+    ]);
+    summon_palette(&session, &handle, &registry, &ui_proxy).map_err(|e| format!("summon: {e}"))?;
+    let spec = expect_create(&handle)?;
+
+    let s = Arc::clone(&session);
+    let mut stage = 0u8;
+    let mut polls = 0u32;
+    let mut scale: f64 = 1.0;
+    let mut origin: Option<(i32, i32)> = None;
+    let mut gen: Option<u64> = None;
+    let harness = PaletteHarness::new(
+        Arc::clone(&session),
+        Arc::clone(&handle),
+        spec,
+        Box::new(move |h, _el, event| {
+            let WindowEvent::RedrawRequested = event else { return Ok(()); };
+            match stage {
+                0 => {
+                    // Baseline frame: render once, then capture the origin
+                    // position and scale before any geometry change.
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    if h.non_background_pixels() == 0 {
+                        return Err("frame must produce non-background pixels".into());
+                    }
+                    let window = h.window.as_ref().ok_or("window not realized")?;
+                    scale = window.scale_factor();
+                    origin = Some(h.window_outer_position()?);
+                    s.set_input("alpha one"); // filtered=[0] → 128 logical height
+                    stage = 1;
+                    polls = 0;
+                    Ok(())
+                }
+                1 => {
+                    // Filter shrink: drive the frame loop (revision sync),
+                    // then poll the window-server height.
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    let target = (128.0 * scale).round() as u32;
+                    match h.window_inner_size()? {
+                        (_, ht) if ht == target => {}
+                        (_, ht) => {
+                            polls += 1;
+                            if polls > 20 {
+                                return Err(format!(
+                                    "filter shrink never reached height {target} \
+                                     (inner={ht}, outer={:?})",
+                                    h.window_outer_position()
+                                ));
+                            }
+                            return Ok(());
+                        }
+                    }
+                    // GAP-3 direct regression: the outer position must equal
+                    // the summon origin EXACTLY after the shrink.
+                    let pos = h.window_outer_position()?;
+                    if Some(pos) != origin {
+                        return Err(format!(
+                            "GAP-3 regression: position moved on filter shrink — {pos:?} != {origin:?}"
+                        ));
+                    }
+                    assert_framebuffer_covers(h, scale, 128.0)?;
+                    s.set_input(""); // restore 5 commands → 320 logical height
+                    stage = 2;
+                    polls = 0;
+                    Ok(())
+                }
+                2 => {
+                    // Restore growth: 128 → 320.
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    let target = (320.0 * scale).round() as u32;
+                    match h.window_inner_size()? {
+                        (_, ht) if ht == target => {}
+                        (_, ht) => {
+                            polls += 1;
+                            if polls > 20 {
+                                return Err(format!(
+                                    "restore growth never reached height {target} \
+                                     (inner={ht}, outer={:?})",
+                                    h.window_outer_position()
+                                ));
+                            }
+                            return Ok(());
+                        }
+                    }
+                    let pos = h.window_outer_position()?;
+                    if Some(pos) != origin {
+                        return Err(format!(
+                            "position moved on restore growth — {pos:?} != {origin:?}"
+                        ));
+                    }
+                    assert_framebuffer_covers(h, scale, 320.0)?;
+                    // WR-01 regression: the Executing transition happens HERE,
+                    // outside any injected frame (a driver tick, like the
+                    // production KeyboardInput event) — the geometry revision
+                    // counter must still drive the +32px growth.
+                    gen = Some(s.generation());
+                    assert!(s.set_executing(gen.unwrap(), "c0"), "Idle → Executing");
+                    stage = 3;
+                    polls = 0;
+                    Ok(())
+                }
+                3 => {
+                    // Executing growth: 320 → 352 (112 + 48·5).
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    let target = (352.0 * scale).round() as u32;
+                    match h.window_inner_size()? {
+                        (_, ht) if ht == target => {}
+                        (_, ht) => {
+                            polls += 1;
+                            if polls > 20 {
+                                return Err(format!(
+                                    "Executing growth never reached height {target} \
+                                     (inner={ht}, outer={:?})",
+                                    h.window_outer_position()
+                                ));
+                            }
+                            return Ok(());
+                        }
+                    }
+                    let pos = h.window_outer_position()?;
+                    if Some(pos) != origin {
+                        return Err(format!(
+                            "position moved on Executing growth — {pos:?} != {origin:?}"
+                        ));
+                    }
+                    assert_framebuffer_covers(h, scale, 352.0)?;
+                    // Ok completion → Hidden. The probe has no runner:
+                    // finalize Ok only lands the Hidden state and does NOT
+                    // deliver the Destroy (production hops it via
+                    // UiThreadProxy) — the probe simulates that hop by
+                    // enqueueing the destroy here, on the same handle.
+                    let created = h.created_id.ok_or("created window id missing")?;
+                    assert_eq!(
+                        s.finalize(gen.unwrap(), Ok(())),
+                        Some(created),
+                        "finalize Ok returns the window id to destroy"
+                    );
+                    h.handle.destroy(created);
+                    stage = 4;
+                    polls = 0;
+                    Ok(())
+                }
+                4 => {
+                    match h.handle.try_recv() {
+                        Some(WindowRequest::Destroy(id)) => {
+                            let created = h.created_id.ok_or("created window id missing")?;
+                            if id != created {
+                                return Err(format!(
+                                    "finalize must destroy the created window ({id} != {created})"
+                                ));
+                            }
+                        }
+                        // Drain Redraw stragglers; keep polling.
+                        _ => {
+                            polls += 1;
+                            if polls > 20 {
+                                return Err("Destroy never enqueued after finalize Ok".into());
+                            }
+                            return Ok(());
+                        }
+                    }
+                    if s.state() != PaletteState::Hidden {
+                        return Err("finalize Ok must move the session to Hidden".into());
+                    }
+                    h.pass();
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
+        }),
+    );
+    run_harness(harness, &ui_proxy)
+}
+
 // ─── Entry point (exit 0 ok / 1 fail / 2 usage — 02-04 discipline) ──────────
 
 fn main() {
@@ -1085,9 +1323,10 @@ fn main() {
         "five_summon_esc_no_residue" => check_five_summon_esc_no_residue(),
         "consecutive_summon_close" => check_consecutive_summon_close(),
         "glyph_shape" => check_glyph_shape(),
+        "position_stable_on_filter" => check_position_stable_on_filter(),
         _ => {
             eprintln!(
-                "usage: palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close|glyph_shape>"
+                "usage: palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close|glyph_shape|position_stable_on_filter>"
             );
             std::process::exit(2);
         }

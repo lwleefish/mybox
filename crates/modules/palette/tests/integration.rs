@@ -96,3 +96,16 @@ fn palette_consecutive_summon_close() {
 fn palette_glyph_shape() {
     run_check("glyph_shape");
 }
+
+/// Test 7 — GAP-3 / WR-01 / WR-02 regression (03-05): on a real window, the
+/// filter shrink (5 commands → 1 match, 320→128), the input restore (1 → 5,
+/// 128→320), and the Executing growth (status line +32px, 320→352) must each
+/// change the window height while the outer position stays EXACTLY at the
+/// summon position (no re-centering — GAP-3 "panel falls" drift), and the
+/// session framebuffer must cover the window's physical size at every stage
+/// (PAL-03 / GAP-3 + WR-01/WR-02).
+#[test]
+#[ignore]
+fn palette_position_stable_on_filter() {
+    run_check("position_stable_on_filter");
+}
