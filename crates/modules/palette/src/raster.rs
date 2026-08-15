@@ -233,8 +233,25 @@ fn paint_textured_triangle(
     let h = clip_pixmap.height() as usize;
     let inv_ppp = 1.0 / pixels_per_point;
 
-    for py in 0..h {
-        for px in 0..w {
+    // Iterate only the triangle's bounding box, not the whole clip pixmap
+    // (a full-window clip rect × hundreds of glyph triangles is O(w·h·N) —
+    // seconds per frame in debug builds; the bbox is exact: pixels outside
+    // it always fail the barycentric test).
+    let min_p = egui::pos2(
+        v0.pos.x.min(v1.pos.x).min(v2.pos.x),
+        v0.pos.y.min(v1.pos.y).min(v2.pos.y),
+    );
+    let max_p = egui::pos2(
+        v0.pos.x.max(v1.pos.x).max(v2.pos.x),
+        v0.pos.y.max(v1.pos.y).max(v2.pos.y),
+    );
+    let px0 = (((min_p.x - origin.x) * pixels_per_point).floor() as i64).clamp(0, w as i64) as usize;
+    let px1 = (((max_p.x - origin.x) * pixels_per_point).ceil() as i64).clamp(0, w as i64) as usize;
+    let py0 = (((min_p.y - origin.y) * pixels_per_point).floor() as i64).clamp(0, h as i64) as usize;
+    let py1 = (((max_p.y - origin.y) * pixels_per_point).ceil() as i64).clamp(0, h as i64) as usize;
+
+    for py in py0..py1 {
+        for px in px0..px1 {
             // Physical pixel center → egui point.
             let p = egui::pos2(
                 origin.x + (px as f32 + 0.5) * inv_ppp,

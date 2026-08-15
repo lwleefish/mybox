@@ -171,8 +171,10 @@ fn toggle_palette(
 }
 
 /// Summon: compute active-monitor geometry → snapshot the command list →
-/// allocate the framebuffer → enqueue Create.
-fn summon_palette(
+/// allocate the framebuffer → enqueue Create. `pub` so 03-02's
+/// `palette_checks` harness can reuse the production path (fake commands are
+/// registered in a `CommandRegistry` by the harness).
+pub fn summon_palette(
     session: &Arc<PaletteSession>,
     windows: &Arc<WindowManagerHandle>,
     commands: &Arc<CommandRegistry>,
@@ -220,7 +222,6 @@ pub fn build_window_spec(
         // egui-winit calls happen here on the main thread only
         // (Anti-Patterns: never touch the winit State off the main thread).
         use winit::event::{ElementState, KeyEvent, WindowEvent};
-        use winit::keyboard::{Key, NamedKey};
 
         session.ensure_winit_state(window);
 
@@ -238,57 +239,8 @@ pub fn build_window_spec(
             ..
         } = event
         {
-            let mut consumed = false;
-            match logical_key {
-                // D-05: ANY key closes an Error panel. This guard arm MUST sit
-                // before the specific-key arms (match arms try in order; a
-                // failing guard falls through to the next arm) — otherwise
-                // ↑/↓/Enter in Error state would hit the navigation arms first
-                // and get swallowed by their state guards, violating "any key
-                // closes". Error-state ESC also closes via this arm.
-                _ if session.state() == PaletteState::Error => {
-                    close_palette(&session, &windows);
-                    consumed = true;
-                }
-                Key::Named(NamedKey::Escape) => {
-                    // PAL-05: close without executing — Idle/Filtering/Empty.
-                    // Executing ignores ESC (only the global hotkey toggle may
-                    // close mid-run; the runner continues, finalize is
-                    // generation-guarded).
-                    if session.state() != PaletteState::Executing {
-                        close_palette(&session, &windows);
-                        consumed = true;
-                    }
-                }
-                Key::Named(NamedKey::ArrowDown) => {
-                    session.move_selection(1);
-                    repaint(&session, &windows);
-                    consumed = true;
-                }
-                Key::Named(NamedKey::ArrowUp) => {
-                    session.move_selection(-1);
-                    repaint(&session, &windows);
-                    consumed = true;
-                }
-                Key::Named(NamedKey::Enter) => {
-                    // resolve_execution_target already maps the selection
-                    // through `filtered` — the returned value is the commands()
-                    // index of the highlighted command (or the first entry
-                    // when nothing is selected, SPEC req 5).
-                    if let Some(idx) = session.resolve_execution_target() {
-                        if let Some(cmd) = session.commands().get(idx).cloned() {
-                            if let Some(ui_proxy) = ui_proxy.get() {
-                                execute::execute(&session, ui_proxy, &windows, cmd);
-                            }
-                        }
-                    }
-                    repaint(&session, &windows);
-                    consumed = true;
-                }
-                _ => {}
-            }
-            if consumed {
-                return; // the panel owns these keys — egui never sees them
+            if on_palette_key(&session, &windows, &ui_proxy, logical_key) {
+                return;
             }
         }
 
@@ -324,9 +276,13 @@ pub fn build_window_spec(
             let full_output = egui_ctx.run(raw, |ctx| ui::draw(ctx, &session));
             session.apply_textures(full_output.textures_delta);
             let primitives = egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+            // Snapshot the texture table FIRST: `with_framebuffer` holds the
+            // session state lock for the duration of the closure, and
+            // `textures()` relocks the same mutex — calling it inside would
+            // deadlock the first frame (found by palette_checks e2e).
+            let textures = session.textures();
             session.with_framebuffer(|framebuffer| {
                 if let Some(framebuffer) = framebuffer {
-                    let textures = session.textures();
                     raster::paint(
                         framebuffer,
                         &primitives,
@@ -383,6 +339,69 @@ pub fn build_window_spec(
 fn repaint(session: &PaletteSession, windows: &Arc<WindowManagerHandle>) {
     if let Some(id) = session.window_id() {
         windows.redraw(id);
+    }
+}
+
+/// Panel key router (PAL-04/PAL-05/D-05) — extracted from the `on_event_win`
+/// closure so the `palette_checks` harness can drive keys without synthesizing
+/// winit `KeyboardInput` events (winit 0.30's `KeyEvent.platform_specific`
+/// field is `pub(crate)` — the struct is not constructible outside winit; the
+/// plan's DeviceId::dummy() fallback cannot work around that).
+///
+/// Returns true when the panel consumed the key (egui never sees it).
+/// The Error-state arm sits FIRST — match arms try in order, and a failing
+/// guard falls through — otherwise ↑/↓/Enter in Error state would hit the
+/// navigation arms and get swallowed by their state guards, violating
+/// "any key closes" (D-05).
+pub fn on_palette_key(
+    session: &Arc<PaletteSession>,
+    windows: &Arc<WindowManagerHandle>,
+    ui_proxy: &Arc<OnceLock<UiThreadProxy>>,
+    logical_key: &winit::keyboard::Key,
+) -> bool {
+    use winit::keyboard::{Key, NamedKey};
+    match logical_key {
+        _ if session.state() == PaletteState::Error => {
+            close_palette(session, windows);
+            true
+        }
+        Key::Named(NamedKey::Escape) => {
+            // PAL-05: close without executing — Idle/Filtering/Empty. Executing
+            // ignores ESC (only the global hotkey toggle may close mid-run; the
+            // runner continues, finalize is generation-guarded).
+            if session.state() != PaletteState::Executing {
+                close_palette(session, windows);
+                true
+            } else {
+                false
+            }
+        }
+        Key::Named(NamedKey::ArrowDown) => {
+            session.move_selection(1);
+            repaint(session, windows);
+            true
+        }
+        Key::Named(NamedKey::ArrowUp) => {
+            session.move_selection(-1);
+            repaint(session, windows);
+            true
+        }
+        Key::Named(NamedKey::Enter) => {
+            // resolve_execution_target already maps the selection through
+            // `filtered` — the returned value is the commands() index of the
+            // highlighted command (or the first entry when nothing is
+            // selected, SPEC req 5). An unset proxy (headless) skips execution.
+            if let Some(idx) = session.resolve_execution_target() {
+                if let Some(cmd) = session.commands().get(idx).cloned() {
+                    if let Some(ui_proxy) = ui_proxy.get() {
+                        execute::execute(session, ui_proxy, windows, cmd);
+                    }
+                }
+            }
+            repaint(session, windows);
+            true
+        }
+        _ => false,
     }
 }
 
