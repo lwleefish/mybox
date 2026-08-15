@@ -3,7 +3,7 @@ status: partial
 phase: 03-命令面板
 source: [03-VERIFICATION.md]
 started: 2026-08-15T00:00:00Z
-updated: 2026-08-15T00:00:00Z
+updated: 2026-08-15T06:00:00Z
 ---
 
 ## Current Test
@@ -13,8 +13,8 @@ updated: 2026-08-15T00:00:00Z
 ## Tests
 
 ### 1. 真实桌面热键唤出
-expected: 运行 mybox-app 后按 Cmd+Shift+Space，当前活动显示器中央出现深色无边框置顶浮窗，输入框自动获得焦点，列出 ≥5 个命令（4 内置 + 1 截图）
-result: failed — 第一次能唤出窗口，之后再次唤出窗口一闪而过（立即关闭）
+expected: 运行 mybox-app 后按 Cmd+Shift+Space，当前活动显示器中央出现深色无边框置顶浮窗，输入框自动获得焦点，列出 ≥5 个命令（4 内置 + 1 截图）；连续 3 次唤出/关闭循环均正常，无闪退
+result: [pending] — GAP-1 已修复（03-03：Pressed 状态守卫 + per-window on_created 配对；探针 consecutive_summon_close 3 轮建销无残留），需真实物理热键复验
 
 ### 2. 过滤/导航走查
 expected: 按 manual_checklist.md（crates/modules/palette/tests/manual_checklist.md）步骤 3/4/6 走查——「截图」/「jt」过滤命中且高亮正确、↑/↓ 环绕导航、ESC 关闭且不执行命令
@@ -30,18 +30,17 @@ result: [pending]
 
 ### 5. 视觉走查
 expected: 面板四角 12px 圆角生效（无黑色方块）、中文命令名 CJK 字形正常渲染（无豆腐块）
-result: failed — 窗口内文字全是灰色块形状，无法识别（字形渲染失败，疑似字体/纹理问题）
+result: [pending] — GAP-2 已修复（03-04：UV 判别 textured 路径 + 原位 partial 图集补丁；探针 glyph_shape 实测 aa_spread=242 vs 旧 bug 基线 40），需真实桌面视觉复验
 
 ## Summary
 
 total: 5
 passed: 0
-issues: 2
-pending: 3
+issues: 0
+pending: 5
 skipped: 0
 blocked: 0
 
 ## Gaps
 
-- [ ] 热键重复唤出：第一次唤出正常，第二次及之后面板一闪而过（立即关闭）——疑似建销生命周期/pending_close 配对缺陷
-- [ ] 文字渲染：窗口内所有文字为灰色块（豆腐块/字形缺失）——疑似字体安装或纹理路径缺陷
+（GAP-1 热键重复唤出 / GAP-2 文字灰色块 已由 03-03 / 03-04 关闭，代码与探针级验证通过，待人工复验）
