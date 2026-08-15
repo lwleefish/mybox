@@ -259,14 +259,21 @@ impl ApplicationHandler<AppEvent> for PaletteHarness {
 /// Press a key through the panel key router (the production on_event_win
 /// path). winit 0.30's `KeyEvent` carries a `pub(crate)` platform field, so
 /// synthetic `KeyboardInput` events are not constructible — the router is the
-/// shared entry point both the closure and this harness drive.
+/// shared entry point both the closure and this harness drive. No modifiers
+/// (the unmodified-key path — every existing probe).
 fn press_key(
     session: &Arc<PaletteSession>,
     handle: &Arc<WindowManagerHandle>,
     ui_proxy: &Arc<OnceLock<UiThreadProxy>>,
     key: mybox_core::winit::keyboard::Key,
 ) -> bool {
-    on_palette_key(session, handle, ui_proxy, &key)
+    on_palette_key(
+        session,
+        handle,
+        ui_proxy,
+        &key,
+        mybox_core::winit::keyboard::ModifiersState::empty(),
+    )
 }
 
 fn fake_command(

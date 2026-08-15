@@ -228,6 +228,16 @@ pub fn build_window_spec(
 
         session.ensure_winit_state(window);
 
+        // GAP-6 modifier tracking: winit 0.30's KeyEvent has no modifiers
+        // field, so the Ctrl+P/N decision reads the state captured from this
+        // separate event stream (the variant carries `event::Modifiers`, whose
+        // `state()` yields the `ModifiersState` we store). NO early return —
+        // the event continues to the egui-winit translation below (it consumes
+        // ModifiersChanged too).
+        if let WindowEvent::ModifiersChanged(m) = event {
+            session.set_modifiers(m.state());
+        }
+
         // 0. Panel key routing — intercepted BEFORE the egui-winit translation
         // (deterministic ownership: egui may consume TextEdit arrow keys, but
         // ↑/↓/Enter/ESC belong to the panel). Consumed events never reach egui.
@@ -242,7 +252,13 @@ pub fn build_window_spec(
             ..
         } = event
         {
-            if on_palette_key(&session, &windows, &ui_proxy, logical_key) {
+            if on_palette_key(
+                &session,
+                &windows,
+                &ui_proxy,
+                logical_key,
+                session.modifiers(),
+            ) {
                 return;
             }
         }
@@ -374,6 +390,14 @@ fn repaint(session: &PaletteSession, windows: &Arc<WindowManagerHandle>) {
 /// field is `pub(crate)` — the struct is not constructible outside winit; the
 /// plan's DeviceId::dummy() fallback cannot work around that).
 ///
+/// GAP-6: winit 0.30.13's `KeyEvent` has no modifiers field (source-verified —
+/// it only landed in winit 0.31), so the Ctrl state for the Ctrl+P/N arms
+/// cannot come from the KeyboardInput event itself. The caller tracks it from
+/// the separate `WindowEvent::ModifiersChanged` event stream
+/// (`session.set_modifiers`) and passes it here — E2E probes and production
+/// share this same router (KeyEvent is not externally constructible,
+/// 03-02 deviation #2).
+///
 /// Returns true when the panel consumed the key (egui never sees it).
 /// The Error-state arm sits FIRST — match arms try in order, and a failing
 /// guard falls through — otherwise ↑/↓/Enter in Error state would hit the
@@ -384,6 +408,7 @@ pub fn on_palette_key(
     windows: &Arc<WindowManagerHandle>,
     ui_proxy: &Arc<OnceLock<UiThreadProxy>>,
     logical_key: &winit::keyboard::Key,
+    modifiers: winit::keyboard::ModifiersState,
 ) -> bool {
     use winit::keyboard::{Key, NamedKey};
     match logical_key {
@@ -401,6 +426,24 @@ pub fn on_palette_key(
             } else {
                 false
             }
+        }
+        // GAP-6: Ctrl+P / Ctrl+N are equivalent to ↑ / ↓ (wrap-around in
+        // filtered space). winit 0.30 delivers letters ALWAYS as
+        // `Key::Character` — `NamedKey` (keyboard.rs:755) has no letter
+        // variants, so no KeyP/KeyN arm exists in this winit version (that
+        // mapping is a 0.31 concept). Without Ctrl the guards fail and plain
+        // P/N fall through to `_ => false` — the event passes on to egui-winit
+        // and the character enters the TextEdit normally (filter semantics
+        // unchanged).
+        Key::Character(s) if modifiers.control_key() && s.eq_ignore_ascii_case("p") => {
+            session.move_selection(-1);
+            repaint(session, windows);
+            true
+        }
+        Key::Character(s) if modifiers.control_key() && s.eq_ignore_ascii_case("n") => {
+            session.move_selection(1);
+            repaint(session, windows);
+            true
         }
         Key::Named(NamedKey::ArrowDown) => {
             session.move_selection(1);
@@ -759,6 +802,186 @@ mod tests {
         let id = module.session.finalize(gen, Ok(()));
         assert_eq!(id, Some(7), "finalize Ok returns the window to destroy");
         assert_eq!(module.session.state(), PaletteState::Hidden);
+    }
+
+    /// A headless key-router rig: session + window handle + an UNSET ui proxy.
+    /// The Ctrl+P/N tests never reach the Enter/execute arm, so no proxy
+    /// injection is needed (same discipline as the existing hotkey tests).
+    fn router_rig() -> (
+        Arc<PaletteSession>,
+        Arc<WindowManagerHandle>,
+        Arc<OnceLock<UiThreadProxy>>,
+    ) {
+        (
+            Arc::new(PaletteSession::new()),
+            Arc::new(WindowManagerHandle::new()),
+            Arc::new(OnceLock::new()),
+        )
+    }
+
+    /// A fake command literal for the router tests.
+    fn fake_cmd(id: &'static str) -> mybox_core::Command {
+        mybox_core::Command {
+            id,
+            name: format!("command {id}"),
+            description: "test".to_string(),
+            keywords: vec![],
+            hide_before_execute: false,
+            runner: Arc::new(|| Box::pin(async { Ok(()) })),
+        }
+    }
+
+    #[test]
+    fn ctrl_p_moves_selection_up() {
+        // GAP-6: Ctrl+P is equivalent to ↑ — consumed by the router and moves
+        // the selection up.
+        use winit::keyboard::{Key, ModifiersState};
+        let (session, windows, ui_proxy) = router_rig();
+        session.summon(vec![fake_cmd("a"), fake_cmd("b"), fake_cmd("c")]);
+        // First ↓ selects index 0 (UI-SPEC); a second ↓ lands on index 1.
+        session.move_selection(1);
+        session.move_selection(1);
+        assert_eq!(session.selection(), Some(1));
+        assert!(
+            on_palette_key(
+                &session,
+                &windows,
+                &ui_proxy,
+                &Key::Character("p".into()),
+                ModifiersState::CONTROL,
+            ),
+            "Ctrl+P must be consumed by the router"
+        );
+        assert_eq!(session.selection(), Some(0), "Ctrl+P moves the selection up");
+    }
+
+    #[test]
+    fn ctrl_n_moves_selection_down() {
+        // GAP-6: Ctrl+N is equivalent to ↓.
+        use winit::keyboard::{Key, ModifiersState};
+        let (session, windows, ui_proxy) = router_rig();
+        session.summon(vec![fake_cmd("a"), fake_cmd("b"), fake_cmd("c")]);
+        session.move_selection(1);
+        assert_eq!(session.selection(), Some(0));
+        assert!(
+            on_palette_key(
+                &session,
+                &windows,
+                &ui_proxy,
+                &Key::Character("n".into()),
+                ModifiersState::CONTROL,
+            ),
+            "Ctrl+N must be consumed by the router"
+        );
+        assert_eq!(session.selection(), Some(1), "Ctrl+N moves the selection down");
+    }
+
+    #[test]
+    fn ctrl_pn_wraps_like_arrows() {
+        // GAP-6: Ctrl+P/N wrap around exactly like ↑/↓.
+        use winit::keyboard::{Key, ModifiersState};
+        let (session, windows, ui_proxy) = router_rig();
+        session.summon(vec![fake_cmd("a"), fake_cmd("b"), fake_cmd("c")]);
+        session.move_selection(1);
+        assert_eq!(session.selection(), Some(0));
+        assert!(
+            on_palette_key(
+                &session,
+                &windows,
+                &ui_proxy,
+                &Key::Character("p".into()),
+                ModifiersState::CONTROL,
+            )
+        );
+        assert_eq!(
+            session.selection(),
+            Some(2),
+            "Ctrl+P at index 0 wraps around to the last entry"
+        );
+        assert!(
+            on_palette_key(
+                &session,
+                &windows,
+                &ui_proxy,
+                &Key::Character("n".into()),
+                ModifiersState::CONTROL,
+            )
+        );
+        assert_eq!(
+            session.selection(),
+            Some(0),
+            "Ctrl+N at the last index wraps around to index 0"
+        );
+    }
+
+    #[test]
+    fn plain_p_without_ctrl_is_not_consumed() {
+        // GAP-6 must-have truth: without Ctrl the guards fail and the router
+        // returns false — plain P/N fall through to egui and enter the
+        // TextEdit as normal characters.
+        use winit::keyboard::{Key, ModifiersState};
+        let (session, windows, ui_proxy) = router_rig();
+        session.summon(vec![fake_cmd("a"), fake_cmd("b"), fake_cmd("c")]);
+        session.move_selection(1);
+        let before = session.selection();
+        assert!(
+            !on_palette_key(
+                &session,
+                &windows,
+                &ui_proxy,
+                &Key::Character("p".into()),
+                ModifiersState::empty(),
+            ),
+            "plain P without Ctrl must fall through to egui"
+        );
+        assert_eq!(session.selection(), before, "plain P must not navigate");
+        assert!(
+            !on_palette_key(
+                &session,
+                &windows,
+                &ui_proxy,
+                &Key::Character("n".into()),
+                ModifiersState::empty(),
+            ),
+            "plain N without Ctrl must fall through to egui"
+        );
+        assert_eq!(session.selection(), before, "plain N must not navigate");
+    }
+
+    #[test]
+    fn ctrl_pn_in_error_state_closes_panel() {
+        // D-05: the Error arm sits FIRST — any key, including Ctrl+P/N, closes
+        // the panel instead of navigating.
+        use winit::keyboard::{Key, ModifiersState};
+        let (session, windows, ui_proxy) = router_rig();
+        let gen = session.summon(vec![fake_cmd("a")]);
+        assert!(session.set_executing(gen, "a"));
+        session.set_window_id(7);
+        assert_eq!(
+            session.finalize(gen, Err(anyhow::anyhow!("x"))),
+            None,
+            "error keeps the window open (D-05)"
+        );
+        assert_eq!(session.state(), PaletteState::Error);
+        assert!(
+            on_palette_key(
+                &session,
+                &windows,
+                &ui_proxy,
+                &Key::Character("p".into()),
+                ModifiersState::CONTROL,
+            ),
+            "any key in Error state is consumed"
+        );
+        assert!(
+            wait_until(|| matches!(windows.try_recv(), Some(WindowRequest::Destroy(7)))),
+            "Ctrl+P in Error state must enqueue Destroy(7)"
+        );
+        assert_eq!(
+            session.state(),
+            PaletteState::Hidden,
+            "Error-state any-key closes the panel"
+        );
     }
 
     #[test]
