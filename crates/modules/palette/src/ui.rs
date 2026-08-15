@@ -130,12 +130,23 @@ pub fn draw(
             let full = ui.painter_at(ui.clip_rect());
 
             // ── SearchInput (48px, #2E2E2E radius 8, 12px padding, 16/400) ──
+            // 03-06 (GAP-4): the card packs EXACTLY per the UI-SPEC geometry
+            // table — item spacing is zeroed so the painted 48px input box +
+            // 8px gap + 48px rows sum to the window height with no slack
+            // (any slack becomes phantom ScrollArea scroll space).
+            ui.spacing_mut().item_spacing.y = 0.0;
             let input_rect = egui::Rect::from_min_size(
                 ui.cursor().min,
                 egui::vec2(ui.available_width(), SP_2XL),
             );
             dim.rect_filled(input_rect, RADIUS_CONTROL, ROW_HOVERED);
             let text_rect = input_rect.shrink(SP_MD);
+            // Reserve the exact 48px input row. The TextEdit is placed in a
+            // child ui that does NOT advance the cursor — its intrinsic
+            // height is font-dependent (~37px) and the old `ui.put` advance
+            // left the painted box only partially accounted, so the list
+            // started at y=60 (touching the box) instead of y=68.
+            ui.allocate_rect(input_rect, egui::Sense::hover());
 
             if executing {
                 // Static input render: no TextEdit exists while Executing, so
@@ -162,8 +173,12 @@ pub fn draw(
                 let _ = session.take_focus_request();
             } else {
                 let mut text = input.clone();
-                let input_resp = ui.put(
-                    text_rect,
+                // The TextEdit lives in its own child ui (`new_child` never
+                // advances the parent cursor) so the reserved 48px input row
+                // above stays intact regardless of the widget's intrinsic
+                // height (03-06: exact card packing).
+                let mut input_ui = ui.new_child(egui::UiBuilder::new().max_rect(text_rect));
+                let input_resp = input_ui.add(
                     egui::TextEdit::singleline(&mut text)
                         .id(egui::Id::new("palette-input"))
                         .font(egui::FontId::new(
@@ -647,13 +662,15 @@ mod tests {
         let proxy = Arc::new(OnceLock::new());
         proxy.set(UiThreadProxy::new()).ok();
 
-        // Panel layout mirrors `draw`: 12px margin → 48px input rect → 8px gap
-        // → row 1 at y 68..116 (center (300, 92)) on a 600×200 screen.
+        // Panel layout mirrors `draw` (exact card packing): 12px margin →
+        // 48px input rect → 8px gap → row 1 at y 68..116 (center (300, 92))
+        // on a 600×200 screen.
         let response: Rc<RefCell<Option<egui::Response>>> = Rc::new(RefCell::new(None));
         let run_row = |ctx: &egui::Context, response: &Rc<RefCell<Option<egui::Response>>>| {
             egui::CentralPanel::default()
                 .frame(egui::Frame::none().inner_margin(SP_MD))
                 .show(ctx, |ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
                     let input_rect = egui::Rect::from_min_size(
                         ui.cursor().min,
                         egui::vec2(ui.available_width(), SP_2XL),
