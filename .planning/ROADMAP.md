@@ -127,7 +127,7 @@ Plans:
 
 **Wave 7** *(gap closure — blocked on Wave 6, shared files)*
 
-- [ ] 03-07: GAP-6 修复——Ctrl+P/Ctrl+N 导航（ModifiersChanged 修饰键跟踪 + on_palette_key modifiers 参数 + E2E ctrl_pn_navigation 探针）
+- [x] 03-07: GAP-6 修复——Ctrl+P/Ctrl+N 导航（ModifiersChanged 修饰键跟踪 + on_palette_key modifiers 参数 + E2E ctrl_pn_navigation 探针）
 
 **Wave 8** *(gap closure — blocked on Wave 7, shared files)*
 

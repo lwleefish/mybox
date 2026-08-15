@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 03-06-PLAN.md
-last_updated: "2026-08-15T08:23:10.680Z"
+stopped_at: Completed 03-07-PLAN.md
+last_updated: "2026-08-15T08:34:24.040Z"
 last_activity: 2026-08-15
 progress:
   total_phases: 4
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 03 (命令面板) — EXECUTING
-Plan: 6 of 8
+Plan: 7 of 8
 Status: Ready to execute
 Last activity: 2026-08-15
 
@@ -57,6 +57,7 @@ Progress: [█████████░] 88%
 | Phase 03-命令面板 P04 | 26min | 3 tasks | 6 files |
 | Phase 03-命令面板 P05 | 12 min | 3 tasks | 4 files |
 | Phase 03-命令面板 P06 | 22 min | 3 tasks | 4 files |
+| Phase 03-命令面板 P07 | 26 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -82,6 +83,8 @@ Recent decisions affecting current work:
 - [Phase 03-命令面板]: 行交互用 ui.interact(Sense::click) + make_persistent_id(('palette-row', cmd.id))——T-03-13 稳定 id；interact 不推进光标，显式 advance_cursor_after_rect 保持 48px 精确打包
 - [Phase 03-命令面板]: 点击执行直接复用 execute::execute（set_executing 防重入守卫拒绝 Executing/Empty/Error 态点击；headless proxy 未注入时跳过，与 on_palette_key Enter 臂同纪律）
 - [Phase 03-命令面板]: 输入区光标改确定性：卡片级 item_spacing.y=0 + allocate_rect 预留 48px + TextEdit 放入 new_child（不推进父光标）——消除 TextEdit 固有高度（~37px）造成的打包漂移
+- [Phase ?]: 修饰键状态经 WindowEvent::ModifiersChanged 事件流跟踪存入 session（GAP-6 修复）：winit 0.30 KeyEvent 无 modifiers 字段，Ctrl+P/N 判定所需状态只能经独立事件流获取；summon 重置防跨窗口残留
+- [Phase ?]: on_palette_key 路由增加 modifiers 参数、Ctrl+P/N 守卫臂等价 move_selection(∓1)：无 Ctrl 守卫不满足返回 false、字符透传 TextEdit；Error 态任意键关闭语义保持
 
 ### Pending Todos
 
@@ -111,6 +114,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-15T08:23:10.669Z
-Stopped at: Completed 03-06-PLAN.md
+Last session: 2026-08-15T08:34:24.027Z
+Stopped at: Completed 03-07-PLAN.md
 Resume file: None
