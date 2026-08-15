@@ -98,7 +98,7 @@ Plans:
   4. 用户通过方向键选择命令，回车执行对应功能
   5. 用户按 ESC 关闭命令面板
 
-**Plans**: 2 plans
+**Plans**: 4 plans
 
 Plans:
 **Wave 1**
@@ -108,6 +108,14 @@ Plans:
 **Wave 2** *(blocked on Wave 1)*
 
 - [x] 03-02: 模糊搜索 + 键盘导航 + 命令执行（fuzzy-matcher 过滤高亮 + 导航状态机 + 执行生命周期 + E2E 集成测试）
+
+**Wave 3** *(gap closure)*
+
+- [ ] 03-03: GAP-1 修复——热键重复唤出失败（core 热键 Pressed-only 过滤 + WindowSpec.on_created 建销配对归属 + E2E consecutive_summon_close 探针 + PAL-01 文档同步）
+
+**Wave 4** *(blocked on Wave 3 — shared files)*
+
+- [ ] 03-04: GAP-2 修复——文字灰色块渲染（raster UV 路径判别 + 图集 partial 补丁 + E2E glyph_shape 探针 + PAL-02 文档同步）
 
 ### Phase 4: 跨平台完善
 
