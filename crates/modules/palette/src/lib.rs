@@ -185,7 +185,8 @@ pub fn summon_palette(
 /// `on_event_win` runs the egui-winit frame loop (event translation → egui run
 /// → tessellate → `raster::paint` into the session framebuffer), intercepts
 /// the panel keys (↑/↓/Enter/ESC/Error-any-key) BEFORE the egui-winit
-/// translation, and syncs the window height on input/state changes; `on_draw`
+/// translation, and syncs the window height on geometry-revision changes
+/// (position is never touched — GAP-3); `on_draw`
 /// blits the framebuffer into the core Pixmap before `present()`; `on_created`
 /// pairs the window id with the session on the main thread (GAP-1 fix — the
 /// build-destroy pairing runs here instead of the broadcast `core/window-created`
@@ -212,6 +213,10 @@ pub fn build_window_spec(
     let created_windows = Arc::clone(&windows);
     // Last physical height applied to the window (the sync gate).
     let last_height = Arc::new(std::sync::Mutex::new(geometry.inner_size.1));
+    // Last geometry revision consumed by the frame loop (WR-01 fix). Starts
+    // at 0: the first frame's revision (≥1 after summon) always triggers one
+    // sync, which the `last_height` gate dedupes into a no-op.
+    let last_revision = Arc::new(std::sync::Mutex::new(0u64));
 
     let on_event_win: Option<
         Box<dyn Fn(&Arc<winit::window::Window>, &winit::event::WindowEvent) + Send + Sync>,
@@ -256,14 +261,8 @@ pub fn build_window_spec(
         }
 
         // 2. Frame loop: run egui, rasterize into the session framebuffer,
-        // then sync the window geometry if input/state changed.
+        // then sync the window geometry on a geometry-revision change.
         if let WindowEvent::RedrawRequested = event {
-            // Snapshots BEFORE the egui run — ui::draw's TextEdit writeback
-            // (session.set_input) completes inside ctx.run (egui Context::run
-            // is synchronous), so the comparison after the run detects input
-            // and state changes.
-            let prev_input = session.input();
-            let prev_state = session.state();
             let raw = session.with_winit_state_mut(|state| {
                 state
                     .as_mut()
@@ -303,9 +302,18 @@ pub fn build_window_spec(
                     .expect("ensure_winit_state ran")
                     .handle_platform_output(window, full_output.platform_output);
             });
-            if prev_input != session.input() || prev_state != session.state() {
+            // WR-01 fix: the sync trigger is the session's geometry revision
+            // counter, NOT an in-frame prev/next snapshot comparison. Enter→
+            // Executing happens in a KeyboardInput event and finalize-Err
+            // hops in via UiThreadProxy — both OUTSIDE a frame, so a snapshot
+            // taken at the next frame always saw prev==current and the sync
+            // never fired. The counter is advanced by the state-machine
+            // methods themselves and deterministically captures every
+            // geometry-affecting transition.
+            if session.geometry_revision() != *last_revision.lock().unwrap() {
+                *last_revision.lock().unwrap() = session.geometry_revision();
                 sync_window_geometry(window, &session, &last_height);
-                // Pitfall 8: a state/input change must repaint (ControlFlow::Wait).
+                // Pitfall 8: a geometry change must repaint (ControlFlow::Wait).
                 window.request_redraw();
             }
         }
@@ -420,10 +428,15 @@ pub fn on_palette_key(
     }
 }
 
-/// Resize the window to the state-dependent height (UI-SPEC geometry table)
-/// and re-center it on its current monitor — the `position::compute_geometry`
-/// centering math, in physical space. Only acts when the height actually
-/// changed (the gate keeps the window from fighting itself every frame).
+/// Resize the window to the state-dependent height (UI-SPEC geometry table,
+/// physical space). **Only the size ever changes — never the position.**
+///
+/// The window position was decided by `position::summon_geometry` at summon
+/// time and is held until the window is destroyed. GAP-3 root cause: the old
+/// version re-centered the window on its monitor after every height change —
+/// a filter shrink then pushed the top edge DOWN (re-centering moved the
+/// smaller window lower), which is the observed "panel falls" drift. The
+/// `last_height` gate ensures the same physical height is requested only once.
 fn sync_window_geometry(
     window: &winit::window::Window,
     session: &PaletteSession,
@@ -440,14 +453,9 @@ fn sync_window_geometry(
     let current = window.inner_size();
     let new_size = winit::dpi::PhysicalSize::new(current.width.max(1), physical_h.max(1));
     let _ = window.request_inner_size(new_size);
-    // Re-center on the monitor the window currently lives on (physical space).
-    if let Some(monitor) = window.current_monitor() {
-        let mpos = monitor.position();
-        let msize = monitor.size();
-        let x = mpos.x + (msize.width.saturating_sub(new_size.width) as i32) / 2;
-        let y = mpos.y + (msize.height.saturating_sub(new_size.height) as i32) / 2;
-        window.set_outer_position(winit::dpi::PhysicalPosition::new(x.max(0), y.max(0)));
-    }
+    // WR-02 fix: keep the framebuffer covering the new physical size — the
+    // region revealed by a window GROWTH would otherwise have nothing to draw.
+    session.resize_framebuffer(new_size.width, new_size.height);
 }
 
 /// Close: enqueue Destroy for the recorded window id (a late window creation
