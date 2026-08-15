@@ -7,9 +7,12 @@
 //! (raster::paint → on_draw blit) live in lib.rs; this module only draws.
 
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 use mybox_core::command::Command;
 use mybox_core::egui;
+use mybox_core::window::WindowManagerHandle;
+use mybox_core::UiThreadProxy;
 
 use crate::filter::{self, Match};
 use crate::session::{PaletteSession, PaletteState};
@@ -82,7 +85,15 @@ pub fn configure_egui_ctx(ctx: &egui::Context) {
 /// The egui frame body: card + search input + the state-dispatched body
 /// (Filtering highlight rows / Empty / Executing status + dimmed list /
 /// Error block / zero-command fallback).
-pub fn draw(ctx: &egui::Context, session: &PaletteSession) {
+///
+/// `windows`/`ui_proxy` (03-06, GAP-5): the row click-execute chain — a click
+/// on a command row routes through `execute::execute` exactly like Enter.
+pub fn draw(
+    ctx: &egui::Context,
+    session: &Arc<PaletteSession>,
+    windows: &Arc<WindowManagerHandle>,
+    ui_proxy: &Arc<OnceLock<UiThreadProxy>>,
+) {
     // Custom-painted card root: opaque BG full-bleed, radius 12, hairline.
     let rect = ctx.screen_rect();
     let painter = ctx.layer_painter(egui::LayerId::background());
@@ -218,7 +229,16 @@ pub fn draw(ctx: &egui::Context, session: &PaletteSession) {
                     );
                     ui.add_space(SP_XS);
                     // Dimmed frozen list (selection stays visible).
-                    draw_command_list(ui, &dim, &commands, &filtered, selection, &highlights);
+                    draw_command_list(
+                        ui,
+                        &commands,
+                        &filtered,
+                        selection,
+                        &highlights,
+                        session,
+                        windows,
+                        ui_proxy,
+                    );
                 }
                 PaletteState::Empty => {
                     draw_state_block(
@@ -248,7 +268,16 @@ pub fn draw(ctx: &egui::Context, session: &PaletteSession) {
                     );
                 }
                 PaletteState::Idle | PaletteState::Filtering => {
-                    draw_command_list(ui, &dim, &commands, &filtered, selection, &highlights);
+                    draw_command_list(
+                        ui,
+                        &commands,
+                        &filtered,
+                        selection,
+                        &highlights,
+                        session,
+                        windows,
+                        ui_proxy,
+                    );
                 }
                 PaletteState::Hidden => {}
             }
@@ -258,17 +287,39 @@ pub fn draw(ctx: &egui::Context, session: &PaletteSession) {
 /// The command list: rows in `filtered` order, selection background, hover
 /// background, keyword highlight (Filtering), auto-scroll to keep the
 /// selection visible.
+///
+/// 03-06 (GAP-4): rows are drawn with the ScrollArea **content ui's own
+/// painter** — row rects live in content coordinates (translated by the
+/// scroll offset) and the old outer CentralPanel painter's screen space only
+/// coincides with them at offset 0. `item_spacing.y` is zeroed because the
+/// geometry table packs rows at exactly 48px — any spacing would make n rows
+/// overflow the viewport (5 rows = 252px > 240px) and create a phantom scroll
+/// offset. The outer `dim`/`full` painters stay untouched: the input box and
+/// the status/error/empty blocks live in CentralPanel space, not inside the
+/// ScrollArea.
 fn draw_command_list(
     ui: &mut egui::Ui,
-    painter: &egui::Painter,
     commands: &[Command],
     filtered: &[usize],
     selection: Option<usize>,
     highlights: &HashMap<usize, Match>,
+    session: &Arc<PaletteSession>,
+    windows: &Arc<WindowManagerHandle>,
+    ui_proxy: &Arc<OnceLock<UiThreadProxy>>,
 ) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            // GAP-4: exact 48px packing — no phantom scroll.
+            ui.spacing_mut().item_spacing.y = 0.0;
+            // GAP-4: content-space painter (same coordinate system as the
+            // row rects). Opacity carries the D-04 dim while Executing.
+            let mut row_painter = ui.painter().clone();
+            row_painter.set_opacity(if session.state() == PaletteState::Executing {
+                0.5
+            } else {
+                1.0
+            });
             for (pos, &idx) in filtered.iter().enumerate() {
                 if let Some(cmd) = commands.get(idx) {
                     // Selection is a FILTERED-space position — compare with the
@@ -277,22 +328,38 @@ fn draw_command_list(
                     let hl = highlights.get(&idx);
                     draw_command_row(
                         ui,
-                        painter,
+                        &row_painter,
                         cmd,
                         selection == Some(pos),
                         hl.map(|m| m.name_indices.as_slice()).unwrap_or(&[]),
                         hl.map(|m| m.description_indices.as_slice()).unwrap_or(&[]),
+                        session,
+                        windows,
+                        ui_proxy,
                     );
                 }
             }
         });
 }
 
-/// A CommandRow: 48px tall, name 14/600 on top, description 12/400 below with
-/// a 4px gap; selected bg #404040, hovered bg #2E2E2E, radius 8 (D-08/D-10).
-/// Matched characters render in `#FF6000` via a LayoutJob (color only — size
-/// and weight stay identical, UI-SPEC lines 62-63). The selected row is
-/// auto-scrolled into view (`scroll_to_rect`, no-op when already visible).
+/// A CommandRow (03-06, GAP-4/GAP-5 rewrite): 48px tall, name 14/600 on top,
+/// description 12/400 below with a 4px gap; selected bg #404040, hovered bg
+/// #2E2E2E, radius 8 (D-08/D-10). Matched characters render in `#FF6000` via
+/// a LayoutJob (color only — size and weight stay identical, UI-SPEC lines
+/// 62-63). The selected row is auto-scrolled into view (`scroll_to_rect`,
+/// no-op when already visible).
+///
+/// GAP-4: painting uses the ScrollArea content ui's own painter (passed in),
+/// so hover/selected backgrounds share the exact row rect coordinate system;
+/// the layout puts the name at top+8 and the description 4px below the name
+/// line (the old layout had name at +20 and the description bottom at ≈+57.8,
+/// spilling past the 48px row into the next row).
+///
+/// GAP-5: rows interact with `Sense::click` under a stable per-command
+/// widget id (T-03-13); a click selects and executes the command with the
+/// same semantics as Enter (guarded by `execute`'s `set_executing`
+/// re-entrancy check — Executing/Empty/Error-state clicks are rejected).
+/// Returns the row `Response` so headless tests can drive hover/click.
 fn draw_command_row(
     ui: &mut egui::Ui,
     painter: &egui::Painter,
@@ -300,14 +367,23 @@ fn draw_command_row(
     selected: bool,
     name_hl: &[usize],
     description_hl: &[usize],
-) {
+    session: &Arc<PaletteSession>,
+    windows: &Arc<WindowManagerHandle>,
+    ui_proxy: &Arc<OnceLock<UiThreadProxy>>,
+) -> egui::Response {
     let row_rect = egui::Rect::from_min_size(
         ui.cursor().min,
         egui::vec2(ui.available_width(), SP_2XL),
     );
-    let resp = ui.allocate_rect(row_rect, egui::Sense::hover());
+    // GAP-5: `Sense::click` under a stable per-command id (the old hover-only
+    // sense could never produce a click — no clicked() branch existed).
+    // `interact` does not advance the cursor; the explicit advance keeps rows
+    // packed at exactly 48px (item_spacing.y is zeroed by draw_command_list).
+    let id = ui.make_persistent_id(("palette-row", cmd.id));
+    let resp = ui.interact(row_rect, id, egui::Sense::click());
+    ui.advance_cursor_after_rect(row_rect);
     if !ui.is_rect_visible(row_rect) {
-        return;
+        return resp;
     }
     if selected {
         painter.rect_filled(row_rect, RADIUS_CONTROL, ROW_SELECTED);
@@ -317,8 +393,18 @@ fn draw_command_row(
     } else if resp.hovered() {
         painter.rect_filled(row_rect, RADIUS_CONTROL, ROW_HOVERED);
     }
-    let inner = row_rect.shrink(SP_MD);
-    let name_pos = inner.left_top() + egui::vec2(0.0, SP_SM);
+    // GAP-5: click = select + execute, the same semantics as Enter. The
+    // re-entrancy guard inside `execute` rejects clicks outside Idle/Filtering
+    // (T-03-11/T-03-12); a headless session (proxy not yet injected) skips
+    // execution — the same discipline as the Enter arm in `on_palette_key`.
+    if resp.clicked() {
+        if let Some(proxy) = ui_proxy.get() {
+            crate::execute::execute(session, proxy, windows, cmd.clone());
+        }
+    }
+    // GAP-4 layout: 12px horizontal padding, 8px top padding; the description
+    // sits 4px below the name line — both lines fit inside the 48px row.
+    let name_pos = egui::pos2(row_rect.left() + SP_MD, row_rect.top() + SP_SM);
     let desc_pos = name_pos + egui::vec2(0.0, FONT_SIZE_NAME * 1.3 + SP_XS);
     let name_job = highlight_job(&cmd.name, name_hl, FONT_SIZE_NAME, TEXT);
     let name_galley = painter.layout_job(name_job);
@@ -326,6 +412,7 @@ fn draw_command_row(
     let desc_job = highlight_job(&cmd.description, description_hl, FONT_SIZE_DESC, TEXT_DIM);
     let desc_galley = painter.layout_job(desc_job);
     painter.galley(desc_pos, desc_galley, TEXT_DIM);
+    resp
 }
 
 /// Build a LayoutJob with the query-hit characters colored `#FF6000`
@@ -504,5 +591,159 @@ mod tests {
         let plain = highlight_job("开始截图", &[], 14.0, TEXT);
         assert_eq!(plain.sections.len(), 1);
         assert_eq!(plain.sections[0].format.color, TEXT);
+    }
+
+    #[test]
+    fn row_geometry_fits_48px() {
+        // GAP-4 arithmetic lock: name top (SP_SM=8) + name line height
+        // (14·1.3=18.2) + gap (SP_XS=4) + description line height (12·1.3=15.6)
+        // must fit inside the 48px row — the old layout (name at +20, desc
+        // bottom ≈+57.8) spilled the description into the next row.
+        let content_h = SP_SM + FONT_SIZE_NAME * 1.3 + SP_XS + FONT_SIZE_DESC * 1.3;
+        assert!(
+            content_h <= SP_2XL,
+            "row content must fit in {SP_2XL}px, got {content_h}"
+        );
+        // The description line must also end above the row bottom (the second
+        // half of GAP-4's spill): desc top = name top + name line + gap, so
+        // desc bottom = desc top + desc line — same arithmetic, one line lower.
+        let desc_bottom = SP_SM + FONT_SIZE_NAME * 1.3 + SP_XS + FONT_SIZE_DESC * 1.3;
+        assert!(
+            desc_bottom <= SP_2XL,
+            "description must end inside the row, got {desc_bottom}"
+        );
+    }
+
+    #[test]
+    fn row_interact_hovers_and_clicks_execute() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // A counting command: the click must route through execute →
+        // set_executing → run_command (the runner increments on its worker
+        // thread) — GAP-5's click = select + execute chain.
+        let count = Arc::new(AtomicUsize::new(0));
+        let cmd = Command {
+            id: "test.row",
+            name: "Row Command".to_string(),
+            description: "click executes".to_string(),
+            keywords: vec![],
+            hide_before_execute: false,
+            runner: {
+                let c = Arc::clone(&count);
+                Arc::new(move || {
+                    let c = Arc::clone(&c);
+                    Box::pin(async move {
+                        c.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                })
+            },
+        };
+        let session = Arc::new(PaletteSession::new());
+        session.summon(vec![cmd.clone()]);
+        let windows = Arc::new(WindowManagerHandle::new());
+        let proxy = Arc::new(OnceLock::new());
+        proxy.set(UiThreadProxy::new()).ok();
+
+        // Panel layout mirrors `draw`: 12px margin → 48px input rect → 8px gap
+        // → row 1 at y 68..116 (center (300, 92)) on a 600×200 screen.
+        let response: Rc<RefCell<Option<egui::Response>>> = Rc::new(RefCell::new(None));
+        let run_row = |ctx: &egui::Context, response: &Rc<RefCell<Option<egui::Response>>>| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none().inner_margin(SP_MD))
+                .show(ctx, |ui| {
+                    let input_rect = egui::Rect::from_min_size(
+                        ui.cursor().min,
+                        egui::vec2(ui.available_width(), SP_2XL),
+                    );
+                    ui.allocate_rect(input_rect, egui::Sense::hover());
+                    ui.add_space(SP_SM);
+                    let row_painter = ui.painter().clone();
+                    *response.borrow_mut() = Some(draw_command_row(
+                        ui,
+                        &row_painter,
+                        &cmd,
+                        false,
+                        &[],
+                        &[],
+                        &session,
+                        &windows,
+                        &proxy,
+                    ));
+                });
+        };
+        let screen_rect =
+            Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 200.0)));
+        let egui_ctx = session.egui_ctx();
+
+        // Frame 1: the pointer moves onto row 1's center. egui 0.30 hit-tests
+        // the PREVIOUS pass's widgets (interaction lags one frame), so this
+        // frame registers the row + establishes the pointer position — the
+        // hover/click assertions run on frame 2's response.
+        let _ = egui_ctx.run(
+            egui::RawInput {
+                screen_rect,
+                events: vec![egui::Event::PointerMoved(egui::pos2(300.0, 92.0))],
+                ..Default::default()
+            },
+            |ctx| run_row(ctx, &response),
+        );
+        assert!(
+            !response.borrow().as_ref().expect("row response").clicked(),
+            "a mere pointer move must not click the row"
+        );
+        assert_eq!(session.state(), PaletteState::Idle, "a pointer move must not execute");
+        assert_eq!(count.load(Ordering::SeqCst), 0, "a pointer move must not run the runner");
+
+        // Frame 2: press + release on row 1. The row widget was registered in
+        // frame 1, so this frame's hit-test sees it: the response is both
+        // hovered (pointer sits inside the row rect) and clicked (press +
+        // release inside the rect) — and the click routes through execute.
+        let _ = egui_ctx.run(
+            egui::RawInput {
+                screen_rect,
+                events: vec![
+                    egui::Event::PointerButton {
+                        pos: egui::pos2(300.0, 92.0),
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::PointerButton {
+                        pos: egui::pos2(300.0, 92.0),
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ctx| run_row(ctx, &response),
+        );
+        assert!(
+            response.borrow().as_ref().expect("row response").hovered(),
+            "the pointer inside row 1 must hover the row"
+        );
+        assert!(
+            response.borrow().as_ref().expect("row response").clicked(),
+            "the click on row 1 must register on the row response"
+        );
+        assert_eq!(
+            session.state(),
+            PaletteState::Executing,
+            "the click must route through execute (Idle → Executing)"
+        );
+        // The runner completes on its worker thread; the finalize hop is
+        // stashed by the headless proxy (no event loop), so the session stays
+        // Executing while the counter proves the runner ran.
+        for _ in 0..200 {
+            if count.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 1, "the click must run the runner");
     }
 }

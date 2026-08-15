@@ -270,7 +270,10 @@ pub fn build_window_spec(
                     .take_egui_input(window)
             });
             let egui_ctx = session.egui_ctx();
-            let full_output = egui_ctx.run(raw, |ctx| ui::draw(ctx, &session));
+            // 03-06 (GAP-5): the click-execute chain — ui::draw threads
+            // windows/ui_proxy into the command rows, where a row click routes
+            // through execute::execute with the same semantics as Enter.
+            let full_output = egui_ctx.run(raw, |ctx| ui::draw(ctx, &session, &windows, &ui_proxy));
             session.apply_textures(full_output.textures_delta);
             let primitives = egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
             // Snapshot the texture table FIRST: `with_framebuffer` holds the
