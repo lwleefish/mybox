@@ -103,7 +103,7 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 03-01: 命令面板窗口 + 命令注册系统（核心命令系统 C1/C2/C5 + 框架窗口扩展 C3/C4/C6 + palette crate 唤出热键/建销/egui 渲染 + capture 命令注册 + 双路日志）
+- [x] 03-01: 命令面板窗口 + 命令注册系统（核心命令系统 C1/C2/C5 + 框架窗口扩展 C3/C4/C6 + palette crate 唤出热键/建销/egui 渲染 + capture 命令注册 + 双路日志）
 
 **Wave 2** *(blocked on Wave 1)*
 
@@ -138,5 +138,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 |-------|----------------|--------|-----------|
 | 1. 框架核心 | 4/4 | Complete   | 2026-08-12 |
 | 2. 截图模块 | 4/4 | Complete   | 2026-08-13 |
-| 3. 命令面板 | 0/2 | Not started | - |
+| 3. 命令面板 | 1/2 | In Progress|  |
 | 4. 跨平台完善 | 0/2 | Not started | - |
