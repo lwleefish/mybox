@@ -71,6 +71,14 @@ struct SessionInner {
     winit_state: Option<egui_winit::State>,
     /// True when the input widget should request focus on the next frame.
     focus_requested: bool,
+    /// Tracked modifier-key state (GAP-6). winit 0.30.13's `KeyEvent` has NO
+    /// modifiers field (source-verified — the field only landed in winit
+    /// 0.31), so the Ctrl+P/N decision cannot read the Ctrl state from the
+    /// KeyboardInput event itself. The state comes from the separate
+    /// `WindowEvent::ModifiersChanged` event stream: the on_event_win closure
+    /// writes it via `set_modifiers` (main thread only) and the key router
+    /// reads it via `modifiers` (any thread).
+    modifiers: winit::keyboard::ModifiersState,
 }
 
 /// Cloneable handle to the shared palette session.
@@ -102,6 +110,7 @@ impl PaletteSession {
                 textures: HashMap::new(),
                 winit_state: None,
                 focus_requested: false,
+                modifiers: winit::keyboard::ModifiersState::empty(),
             })),
             egui_ctx: Arc::new(std::sync::Mutex::new(egui::Context::default())),
         }
@@ -115,6 +124,10 @@ impl PaletteSession {
         let mut inner = self.state.lock().unwrap();
         inner.generation += 1;
         inner.geometry_revision += 1;
+        // T-03-15: a fresh window starts with a fresh modifier state — a stale
+        // Ctrl from a previous window must never make the new panel swallow
+        // plain P/N input.
+        inner.modifiers = winit::keyboard::ModifiersState::empty();
         inner.state = PaletteState::Idle;
         inner.input.clear();
         inner.selection = None;
@@ -203,6 +216,21 @@ impl PaletteSession {
 
     pub fn generation(&self) -> u64 {
         self.state.lock().unwrap().generation
+    }
+
+    /// Record the modifier-key state (GAP-6). The on_event_win closure feeds
+    /// this from `WindowEvent::ModifiersChanged` — the ONLY source of modifier
+    /// state (winit 0.30's `KeyEvent` has no modifiers field). Written only on
+    /// the main thread; the key router reads it from any thread.
+    pub fn set_modifiers(&self, m: winit::keyboard::ModifiersState) {
+        self.state.lock().unwrap().modifiers = m;
+    }
+
+    /// The tracked modifier-key state (GAP-6) — read by `on_palette_key` to
+    /// guard the Ctrl+P/N navigation arms. `ModifiersState` is `Copy`, so it
+    /// is returned by value.
+    pub fn modifiers(&self) -> winit::keyboard::ModifiersState {
+        self.state.lock().unwrap().modifiers
     }
 
     /// The geometry revision counter — the deterministic height-sync trigger
@@ -895,6 +923,44 @@ mod tests {
         assert_eq!(s.finalize(gen, Ok(())), None, "wrong state → no-op");
         assert_eq!(s.state(), PaletteState::Hidden);
         assert!(!s.has_live_window());
+    }
+
+    #[test]
+    fn modifiers_tracking_roundtrip() {
+        // GAP-6: the modifier state is tracked via the ModifiersChanged event
+        // stream (winit 0.30 KeyEvent has no modifiers field). set / read /
+        // clear must round-trip deterministically.
+        let s = PaletteSession::new();
+        assert_eq!(
+            s.modifiers(),
+            winit::keyboard::ModifiersState::empty(),
+            "a fresh session tracks no modifiers"
+        );
+        s.set_modifiers(winit::keyboard::ModifiersState::CONTROL);
+        assert_eq!(s.modifiers(), winit::keyboard::ModifiersState::CONTROL);
+        assert!(s.modifiers().control_key(), "CONTROL must report control_key()");
+        s.set_modifiers(winit::keyboard::ModifiersState::empty());
+        assert_eq!(
+            s.modifiers(),
+            winit::keyboard::ModifiersState::empty(),
+            "an explicit clear resets the tracked state"
+        );
+    }
+
+    #[test]
+    fn summon_resets_modifiers() {
+        // T-03-15: a stale Ctrl state from a previous window must never make
+        // a fresh panel swallow plain P/N input — summon resets the modifiers.
+        let s = PaletteSession::new();
+        s.summon(vec![sample_command("a")]);
+        s.set_modifiers(winit::keyboard::ModifiersState::CONTROL);
+        assert!(s.modifiers().control_key());
+        s.summon(vec![sample_command("a")]);
+        assert_eq!(
+            s.modifiers(),
+            winit::keyboard::ModifiersState::empty(),
+            "summon must reset the modifier state"
+        );
     }
 
     #[test]
