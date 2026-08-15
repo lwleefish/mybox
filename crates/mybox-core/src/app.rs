@@ -356,12 +356,13 @@ impl App {
     /// it only appears as a callback parameter, W2).
     ///
     /// Builds attributes from the spec, creates the winit window, attaches a
-    /// renderer, registers the state, announces `FrameworkEvent::WindowCreated`,
-    /// and requests the first redraw.
+    /// renderer, registers the state, runs the per-window `on_created` callback
+    /// (GAP-1 pairing fix), announces `FrameworkEvent::WindowCreated`, and
+    /// requests the first redraw.
     pub fn create_window(
         &mut self,
         el: &winit::event_loop::ActiveEventLoop,
-        spec: WindowSpec,
+        mut spec: WindowSpec,
     ) -> Result<WindowId> {
         let attrs = window_attributes(&spec);
         let window = el
@@ -399,6 +400,10 @@ impl App {
         let id = self.windows.next_id();
         let window = Arc::new(window);
         let renderer = (self.renderer_factory)(Arc::clone(&window))?;
+        // Take the per-window creation callback out before the spec moves into
+        // `register`. It runs after the state is registered and before the
+        // broadcast bus event below.
+        let on_created = spec.on_created.take();
         self.windows.register(
             id,
             spec.kind,
@@ -407,6 +412,13 @@ impl App {
             renderer,
             spec,
         );
+        // GAP-1 pairing fix: the callback may enqueue a Destroy (palette
+        // pending_close pairing) — the same `about_to_wait` drain pass will
+        // execute it. The bus `window-created` event below stays: the capture
+        // module still relies on the broadcast.
+        if let Some(cb) = on_created {
+            cb(id);
+        }
         self.bus.emit(Event {
             from: "core",
             kind: "window-created",

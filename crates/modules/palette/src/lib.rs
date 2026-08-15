@@ -3,9 +3,12 @@
 //! Global hotkey (`toggle_palette`, default `Cmd+Shift+Space`) → a Floating
 //! window centered on the active monitor → egui renders the command list
 //! (render closures land in Task 4 of plan 03-01). Lifecycle is build-on-
-//! summon / destroy-on-close (D-06) with `window-created` pairing so no
-//! orphan windows survive a fast toggle (the Phase 2 re-entrancy lesson
-//! generalized).
+//! summon / destroy-on-close (D-06) with per-window `WindowSpec.on_created`
+//! pairing so no orphan windows survive a fast toggle (the Phase 2
+//! re-entrancy lesson generalized). The pairing is guaranteed by the
+//! on_created callback — the palette never subscribes to the broadcast
+//! `core/window-created` event, so other modules' windows can neither
+//! overwrite the palette's window id nor consume its pending_close (GAP-1).
 
 pub mod execute;
 pub mod filter;
@@ -100,24 +103,12 @@ impl Module for PaletteModule {
             }),
         );
 
-        // window-created pairing: record the id, or destroy right away if a
-        // close arrived first (prevents orphaned palette windows — capture's
-        // `torn_down_pending` shape, generalized).
-        let wc_session = Arc::clone(&self.session);
-        let wc_windows = ctx.windows().clone();
-        ctx.on(
-            EventFilter::kind("core", "window-created"),
-            Box::new(move |e| {
-                if let EventPayload::Framework(FrameworkEvent::WindowCreated(id)) = &e.payload {
-                    if wc_session.consume_pending_close() {
-                        log::debug!("palette: late window {id} destroyed (close arrived first)");
-                        wc_windows.destroy(*id);
-                    } else {
-                        wc_session.set_window_id(*id);
-                    }
-                }
-            }),
-        );
+        // (GAP-1, T-03-02) No `core/window-created` subscription here: the
+        // build-destroy pairing runs through the per-window
+        // `WindowSpec.on_created` callback (see `build_window_spec`), so only
+        // the palette's own window ever touches this session. The broadcast
+        // event still exists for the capture module and must never be
+        // consumed by the palette.
 
         // Deferred hotkey registration (capture template, CAP-01 shape): module
         // init runs inside AppBuilder::build BEFORE hotkeys.init(), so a
@@ -195,8 +186,12 @@ pub fn summon_palette(
 /// → tessellate → `raster::paint` into the session framebuffer), intercepts
 /// the panel keys (↑/↓/Enter/ESC/Error-any-key) BEFORE the egui-winit
 /// translation, and syncs the window height on input/state changes; `on_draw`
-/// blits the framebuffer into the core Pixmap before `present()`. `pub` so
-/// 03-02's `palette_checks` harness can reuse it.
+/// blits the framebuffer into the core Pixmap before `present()`; `on_created`
+/// pairs the window id with the session on the main thread (GAP-1 fix — the
+/// build-destroy pairing runs here instead of the broadcast `core/window-created`
+/// bus event, so only the palette's own window can touch the session: a
+/// pending close destroys the late window immediately, otherwise the id is
+/// recorded). `pub` so 03-02's `palette_checks` harness can reuse it.
 ///
 /// The closures capture the injected `ui_proxy` (an `Arc<OnceLock<UiThreadProxy>>`):
 /// the Enter arm reads it via `ui_proxy.get()` — unset (headless) skips
@@ -212,6 +207,9 @@ pub fn build_window_spec(
     let ui_proxy = Arc::clone(ui_proxy);
     // One clone per closure (on_event_win and on_draw below).
     let session_draw = Arc::clone(&session);
+    // GAP-1 pairing closure: session/windows clones for `on_created`.
+    let created_session = Arc::clone(&session);
+    let created_windows = Arc::clone(&windows);
     // Last physical height applied to the window (the sync gate).
     let last_height = Arc::new(std::sync::Mutex::new(geometry.inner_size.1));
 
@@ -330,6 +328,15 @@ pub fn build_window_spec(
         position: Some(geometry.position),
         on_event_win,
         on_draw,
+        // GAP-1: the per-window pairing callback — App::create_window invokes
+        // it on the main thread after registering the window. A pending close
+        // destroys the late window immediately; otherwise the id is recorded.
+        on_created: Some(Box::new(move |id| {
+            if created_session.on_window_created(id) {
+                log::debug!("palette: late window {id} destroyed (close arrived first)");
+                created_windows.destroy(id);
+            }
+        })),
         ..Default::default()
     }
 }
@@ -435,8 +442,8 @@ fn sync_window_geometry(
     }
 }
 
-/// Close: enqueue Destroy for the recorded window id (a late window-created
-/// is destroyed by the pairing handler in `init`).
+/// Close: enqueue Destroy for the recorded window id (a late window creation
+/// is destroyed by the `on_created` pairing callback in `build_window_spec`).
 fn close_palette(session: &PaletteSession, windows: &Arc<WindowManagerHandle>) {
     if let Some(id) = session.close() {
         windows.destroy(id);
@@ -577,36 +584,99 @@ mod tests {
 
     #[test]
     fn late_window_created_after_close_is_destroyed() {
-        // Build-destroy pairing: close before window-created → the late window
-        // is destroyed immediately (no orphan, the 02-04 re-entrancy lesson).
+        // Build-destroy pairing via the production on_created callback: close
+        // before the window is created → the late creation is destroyed
+        // immediately (no orphan, the 02-04 re-entrancy lesson; the GAP-1
+        // per-window pairing path).
         let (bus, handle, ctx) = sample_context();
         let module = PaletteModule::new();
         module.init(&ctx).expect("init registers handlers");
 
         emit_toggle(&bus);
+        // Capture the spec (not just matches!) so the on_created callback can
+        // be driven directly — what production's App::create_window does.
+        let spec_slot: Arc<std::sync::Mutex<Option<WindowSpec>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let slot = Arc::clone(&spec_slot);
         assert!(
-            wait_until(|| matches!(handle.try_recv(), Some(WindowRequest::Create(_)))),
+            wait_until(|| match handle.try_recv() {
+                Some(WindowRequest::Create(spec)) => {
+                    *slot.lock().unwrap() = Some(spec);
+                    true
+                }
+                _ => false,
+            }),
             "first toggle must summon"
         );
 
-        // Close before any window-created event arrives → pending_close set.
+        // Close before the window is created → pending_close set.
         emit_toggle(&bus);
         assert!(
             wait_until(|| module.session.has_live_window()),
             "close-before-create must leave the pairing pending"
         );
 
-        // Now simulate the late window-created from the core.
-        bus.emit(Event {
-            from: "core",
-            kind: "window-created",
-            payload: EventPayload::Framework(FrameworkEvent::WindowCreated(9)),
-        });
+        // Simulate the late creation: production calls spec.on_created(id) on
+        // the main thread inside create_window.
+        let cb = spec_slot
+            .lock()
+            .unwrap()
+            .as_mut()
+            .and_then(|spec| spec.on_created.take())
+            .expect("spec must carry the on_created pairing callback");
+        cb(9);
         assert!(
             wait_until(|| matches!(handle.try_recv(), Some(WindowRequest::Destroy(9)))),
             "late window must be destroyed immediately"
         );
         assert!(!module.session.has_live_window(), "pairing consumed — nothing live");
+    }
+
+    #[test]
+    fn summon_spec_carries_on_created_pairing() {
+        // The production pairing lives in the spec: the on_created callback
+        // records the palette's OWN window id, and a later toggle destroys
+        // exactly that window (GAP-1 — no broadcast window-created involved,
+        // so another module's window can never be paired or destroyed here).
+        let (bus, handle, ctx) = sample_context();
+        let module = PaletteModule::new();
+        module.init(&ctx).expect("init registers handlers");
+
+        emit_toggle(&bus);
+        let spec_slot: Arc<std::sync::Mutex<Option<WindowSpec>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let slot = Arc::clone(&spec_slot);
+        assert!(
+            wait_until(|| match handle.try_recv() {
+                Some(WindowRequest::Create(spec)) => {
+                    *slot.lock().unwrap() = Some(spec);
+                    true
+                }
+                _ => false,
+            }),
+            "first toggle must summon"
+        );
+        let mut guard = spec_slot.lock().unwrap();
+        let spec = guard.as_mut().expect("spec captured");
+        assert!(spec.on_created.is_some(), "spec must carry the pairing callback");
+
+        // Simulate the main-thread on_created call with id 42.
+        let cb = spec.on_created.take().expect("pairing callback");
+        cb(42);
+        assert_eq!(
+            module.session.window_id(),
+            Some(42),
+            "on_created must record the palette window id"
+        );
+        drop(guard);
+
+        // Toggle again → the paired window is destroyed.
+        emit_toggle(&bus);
+        assert!(
+            wait_until(|| matches!(handle.try_recv(), Some(WindowRequest::Destroy(42)))),
+            "second toggle must enqueue Destroy(42)"
+        );
+        assert_eq!(module.session.state(), session::PaletteState::Hidden);
     }
 
     #[test]

@@ -50,7 +50,8 @@ struct SessionInner {
     commands: Vec<Command>,
     window_id: Option<WindowId>,
     /// Set when `close()` ran before the window was created (build-destroy
-    /// pairing — the capture `torn_down_pending` shape generalized).
+    /// pairing — the capture `torn_down_pending` shape generalized; consumed
+    /// by the `on_created` callback path, not the broadcast bus event).
     pending_close: bool,
     /// Incremented per summon; guards stale runner completions (Pitfall 3).
     generation: u64,
@@ -114,14 +115,36 @@ impl PaletteSession {
         inner.generation
     }
 
-    /// Record the framework window id (from `core/window-created`).
+    /// Record the framework window id (harness/test path; production pairs via
+    /// `on_window_created`).
     pub fn set_window_id(&self, id: WindowId) {
         self.state.lock().unwrap().window_id = Some(id);
     }
 
+    /// Build-destroy pairing entry point for the palette's OWN window. Must be
+    /// called only from the `WindowSpec.on_created` callback — never from a
+    /// subscription to the broadcast `core/window-created` bus event (that
+    /// event also fires for every OTHER module's windows, which would let a
+    /// capture overlay overwrite the palette's window id or let a stray
+    /// pending close destroy someone else's window — GAP-1, T-03-02).
+    ///
+    /// Returns `true` when a close arrived before the window was created
+    /// (`pending_close`): the caller must destroy the incoming window
+    /// immediately. Otherwise records the id as the live palette window and
+    /// returns `false`.
+    pub fn on_window_created(&self, id: WindowId) -> bool {
+        let mut inner = self.state.lock().unwrap();
+        if inner.pending_close {
+            inner.pending_close = false;
+            return true;
+        }
+        inner.window_id = Some(id);
+        false
+    }
+
     /// True while the palette is summonable-closed: a window exists, a create
     /// request is in flight (`pending_close`), or the session was summoned but
-    /// the window-created event has not arrived yet. The last case matters for
+    /// the on_created pairing has not happened yet. The last case matters for
     /// re-entrancy: a toggle during the in-flight window must CLOSE (pairing
     /// up), never summon a second window (the Phase 2 re-entrancy lesson).
     pub fn has_live_window(&self) -> bool {
@@ -134,7 +157,7 @@ impl PaletteSession {
     /// Close the palette: move to Hidden and return the window id to destroy
     /// (the caller enqueues `WindowRequest::Destroy`). If no window id was
     /// recorded yet but a summon is in flight, `pending_close` is set so the
-    /// late `window-created` event destroys the window immediately — the
+    /// late on_created callback destroys the window immediately — the
     /// build-destroy pairing (capture `torn_down_pending` shape).
     pub fn close(&self) -> Option<WindowId> {
         let mut inner = self.state.lock().unwrap();
@@ -151,8 +174,9 @@ impl PaletteSession {
         }
     }
 
-    /// Consume a pending close (window-created handler: if true, the incoming
-    /// window must be destroyed immediately).
+    /// Consume a pending close (on_created pairing path: if true, the incoming
+    /// window must be destroyed immediately). Also asserted by the
+    /// `five_summon_esc` check for residue detection.
     pub fn consume_pending_close(&self) -> bool {
         let mut inner = self.state.lock().unwrap();
         let was = inner.pending_close;

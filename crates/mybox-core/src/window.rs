@@ -53,6 +53,14 @@ pub struct WindowSpec {
     /// size so the module can composite content (capture blit, mask, annotations,
     /// toolbar). Invoked by `handle_redraw` on the main thread before `present()`.
     pub on_draw: Option<Box<dyn Fn(&mut tiny_skia::PixmapMut, u32, u32) + Send + Sync>>,
+    /// Per-window creation callback: invoked by `App::create_window` on the main
+    /// thread, synchronously, after the window is registered but before the
+    /// `core/window-created` bus event (GAP-1 fix — the palette's build-destroy
+    /// pairing switched from the broadcast bus event to this per-window
+    /// ownership callback so other modules' windows can never touch the palette
+    /// session). The callback may enqueue a `Destroy` (palette `pending_close`
+    /// pairing); the same `about_to_wait` drain pass will execute it.
+    pub on_created: Option<Box<dyn Fn(WindowId) + Send + Sync>>,
 }
 
 impl Default for WindowSpec {
@@ -70,6 +78,7 @@ impl Default for WindowSpec {
             on_event: None,
             on_event_win: None,
             on_draw: None,
+            on_created: None,
         }
     }
 }
@@ -457,6 +466,7 @@ mod tests {
         assert!(spec.on_event.is_none());
         assert!(spec.on_event_win.is_none());
         assert!(spec.on_draw.is_none());
+        assert!(spec.on_created.is_none());
     }
 
     #[test]
