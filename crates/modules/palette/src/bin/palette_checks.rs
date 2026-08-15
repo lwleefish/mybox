@@ -1312,6 +1312,244 @@ fn check_position_stable_on_filter() -> Result<(), String> {
     run_harness(harness, &ui_proxy)
 }
 
+// ─── Check 8: hover highlight + click alignment on a real window (GAP-4 /
+//     GAP-5 regression, 03-06) ──────────────────────────────────────────────
+
+/// Real-window hover/click alignment probe (PAL-04 / GAP-4 / GAP-5, 03-06).
+///
+/// Injects synthetic pointer events (`CursorMoved` / `MouseInput` — winit
+/// exposes these structs for external construction, unlike `KeyEvent`) through
+/// the real window + the production `on_event_win` closure, so the full chain
+/// egui-winit translation → egui hit-testing → `Response::clicked()` →
+/// `execute::execute` runs exactly as production drives it:
+///
+/// - stage 0: baseline Idle frame; capture the window scale factor.
+/// - stage 1: inject `CursorMoved` at row 1's center (logical (300, 92) — the
+///   row band is y 68..116 below the 12..60 input box + 8px gap), render the
+///   hover frame, then measure the composited framebuffer (physical space,
+///   scale-converted):
+///   * `hover_px_in_band` ≥ 100 — the ROW_HOVERED fill (#2E2E2E) covers the
+///     row band (GAP-4: interaction + painting now share the content
+///     coordinate system, the highlight sits exactly on the row rect);
+///   * `hover_px_above_band` == 0 — no highlight pixel in the 8px band above
+///     the row (between the input box bottom and row 1's top): the direct
+///     "highlight floats above the text area" regression;
+///   * `text_px_in_band` > 0 — row text (non-chrome) pixels live inside the
+///     same band, so highlight and text overlap.
+///   Then inject `MouseInput` Pressed.
+/// - stage 2: render one frame with the button down; inject Released.
+/// - stage 3: render the frame that processes the release — this is the frame
+///   where the click fires. Assert `Executing` and that the gated runner has
+///   NOT completed (the click routed through execute with the re-entrancy
+///   guard — GAP-5: the old hover-only sense could never produce a click).
+///   Release the runner gate.
+/// - stage 4: poll for the finalize Destroy (the real `UiThreadProxy` hop),
+///   assert `Hidden` + the runner ran exactly once.
+///
+/// Coverage statement (kept honest): the probe drives the real window and the
+/// real on_event_win closure with synthetic pointer events — everything from
+/// the egui-winit translation through the clicked→execute chain is exercised.
+/// OS-level physical mouse behavior (real cursor tracking, click targeting on
+/// the desktop) is re-verified by human UAT tests 7/8.
+fn check_hover_click_alignment() -> Result<(), String> {
+    use mybox_core::winit::event::{DeviceId, ElementState, MouseButton};
+
+    let session = Arc::new(PaletteSession::new());
+    let handle = Arc::new(WindowManagerHandle::new());
+    let ui_proxy = Arc::new(OnceLock::new());
+    // c0 carries a gated runner so the click→execute transition is observable
+    // deterministically (Executing + counter==0 before the gate release).
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let registry = registry_with(vec![
+        fake_command(
+            "c0",
+            "Alpha One",
+            &[],
+            gated_runner(Arc::clone(&counter), release_rx),
+        ),
+        fake_command("c1", "Beta Two", &[], ok_runner()),
+        fake_command("c2", "Gamma Three", &[], ok_runner()),
+        fake_command("c3", "Delta Four", &[], ok_runner()),
+        fake_command("c4", "Epsilon Five", &[], ok_runner()),
+    ]);
+    summon_palette(&session, &handle, &registry, &ui_proxy).map_err(|e| format!("summon: {e}"))?;
+    let spec = expect_create(&handle)?;
+
+    let s = Arc::clone(&session);
+    let mut stage = 0u8;
+    let mut scale: f64 = 1.0;
+    let mut polls = 0u32;
+    let harness = PaletteHarness::new(
+        Arc::clone(&session),
+        Arc::clone(&handle),
+        spec,
+        Box::new(move |h, _el, event| {
+            let WindowEvent::RedrawRequested = event else { return Ok(()); };
+            match stage {
+                0 => {
+                    // Baseline Idle frame renders 5 rows (registers the row
+                    // widgets for the next frame's hit-test).
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    if h.non_background_pixels() == 0 {
+                        return Err("Idle frame must produce non-background pixels".into());
+                    }
+                    let window = h.window.as_ref().ok_or("window not realized")?;
+                    scale = window.scale_factor();
+                    // Hover row 1's center: logical (300, 92) — row band
+                    // y 68..116 (input box 12..60 + 8px gap, 48px rows).
+                    h.inject(WindowEvent::CursorMoved {
+                        device_id: DeviceId::dummy(),
+                        position: mybox_core::winit::dpi::PhysicalPosition::new(
+                            300.0 * scale,
+                            92.0 * scale,
+                        ),
+                    })?;
+                    stage = 1;
+                    Ok(())
+                }
+                1 => {
+                    // Render the hover frame, then measure the composited
+                    // framebuffer (physical space, scale-converted).
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    let (width, height, data) = h.session.with_framebuffer(|fb| match fb {
+                        Some(p) => (p.width(), p.height(), p.data().to_vec()),
+                        None => (0, 0, vec![]),
+                    });
+                    let y_band_top = (68.0 * scale).round() as usize;
+                    let y_band_bottom = (116.0 * scale).round() as usize;
+                    let y_above_top = (60.0 * scale).round() as usize;
+                    // ui.rs chrome tokens: BG #202020, ROW_HOVERED #2E2E2E,
+                    // ROW_SELECTED #404040 (composited framebuffer, opaque).
+                    let is_hover_fill =
+                        |p: &[u8]| p[3] > 0 && p[0] == 46 && p[1] == 46 && p[2] == 46;
+                    let is_chrome = |p: &[u8]| {
+                        (p[0] == 32 && p[1] == 32 && p[2] == 32)
+                            || (p[0] == 46 && p[1] == 46 && p[2] == 46)
+                            || (p[0] == 64 && p[1] == 64 && p[2] == 64)
+                    };
+                    let mut hover_px_in_band = 0usize;
+                    let mut hover_px_above_band = 0usize;
+                    let mut text_px_in_band = 0usize;
+                    for y in 0..height as usize {
+                        for x in 0..width as usize {
+                            let i = (y * width as usize + x) * 4;
+                            let p = &data[i..i + 4];
+                            if is_hover_fill(p) {
+                                if (y_band_top..y_band_bottom).contains(&y) {
+                                    hover_px_in_band += 1;
+                                } else if (y_above_top..y_band_top).contains(&y) {
+                                    hover_px_above_band += 1;
+                                }
+                            }
+                            if (y_band_top..y_band_bottom).contains(&y) && p[3] > 0 && !is_chrome(p)
+                            {
+                                text_px_in_band += 1;
+                            }
+                        }
+                    }
+                    let measured = format!(
+                        "hover_px_in_band={hover_px_in_band} \
+                         hover_px_above_band={hover_px_above_band} \
+                         text_px_in_band={text_px_in_band} scale={scale}"
+                    );
+                    if hover_px_in_band < 100 {
+                        return Err(format!(
+                            "GAP-4 regression: hover fill does not cover the row band \
+                             ({measured}; the row fill must produce ≥100 exact-#2E2E2E pixels)"
+                        ));
+                    }
+                    if hover_px_above_band != 0 {
+                        return Err(format!(
+                            "GAP-4 regression: hover fill bleeds above the row band ({measured})"
+                        ));
+                    }
+                    if text_px_in_band == 0 {
+                        return Err(format!(
+                            "GAP-4 regression: no row text inside the hovered band ({measured})"
+                        ));
+                    }
+                    eprintln!(
+                        "palette_checks hover_click_alignment: {measured} — \
+                         hover aligned with the row band"
+                    );
+                    h.inject(WindowEvent::MouseInput {
+                        device_id: DeviceId::dummy(),
+                        state: ElementState::Pressed,
+                        button: MouseButton::Left,
+                    })?;
+                    stage = 2;
+                    Ok(())
+                }
+                2 => {
+                    // One frame while the button is down, then release.
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    h.inject(WindowEvent::MouseInput {
+                        device_id: DeviceId::dummy(),
+                        state: ElementState::Released,
+                        button: MouseButton::Left,
+                    })?;
+                    stage = 3;
+                    Ok(())
+                }
+                3 => {
+                    // The release frame computes the click → execute. The
+                    // gated runner blocks, so the session stays Executing and
+                    // the counter is still 0 — the click DID route through
+                    // execute (GAP-5: the old hover-only sense never could).
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    if s.state() != PaletteState::Executing {
+                        return Err(format!(
+                            "GAP-5 regression: the click must enter Executing, got {:?}",
+                            s.state()
+                        ));
+                    }
+                    if counter.load(Ordering::SeqCst) != 0 {
+                        return Err("the gated runner must not complete before release".into());
+                    }
+                    let _ = release_tx.send(());
+                    stage = 4;
+                    polls = 0;
+                    Ok(())
+                }
+                4 => {
+                    // The real finalize hop (AppEvent::Ui) destroys the window.
+                    match h.handle.try_recv() {
+                        Some(WindowRequest::Destroy(id)) => {
+                            if Some(id) != h.created_id {
+                                return Err(format!(
+                                    "finalize must destroy the created window ({id} != {:?})",
+                                    h.created_id
+                                ));
+                            }
+                        }
+                        // Drain Redraw stragglers; keep polling.
+                        _ => {
+                            polls += 1;
+                            if polls > 20 {
+                                return Err(
+                                    "Destroy never enqueued after the click execution".into()
+                                );
+                            }
+                            return Ok(());
+                        }
+                    }
+                    if s.state() != PaletteState::Hidden {
+                        return Err("finalize Ok must close the panel".into());
+                    }
+                    if counter.load(Ordering::SeqCst) != 1 {
+                        return Err("the clicked runner must run exactly once".into());
+                    }
+                    h.pass();
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
+        }),
+    );
+    run_harness(harness, &ui_proxy)
+}
+
 // ─── Entry point (exit 0 ok / 1 fail / 2 usage — 02-04 discipline) ──────────
 
 fn main() {
@@ -1324,9 +1562,10 @@ fn main() {
         "consecutive_summon_close" => check_consecutive_summon_close(),
         "glyph_shape" => check_glyph_shape(),
         "position_stable_on_filter" => check_position_stable_on_filter(),
+        "hover_click_alignment" => check_hover_click_alignment(),
         _ => {
             eprintln!(
-                "usage: palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close|glyph_shape|position_stable_on_filter>"
+                "usage: palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close|glyph_shape|position_stable_on_filter|hover_click_alignment>"
             );
             std::process::exit(2);
         }

@@ -109,3 +109,17 @@ fn palette_glyph_shape() {
 fn palette_position_stable_on_filter() {
     run_check("position_stable_on_filter");
 }
+
+/// Test 8 — GAP-4 / GAP-5 regression (03-06, PAL-04): on a real window,
+/// synthetic CursorMoved + MouseInput events drive the full egui-winit → egui
+/// hit-testing → clicked → execute chain. The hover frame must put the
+/// ROW_HOVERED fill exactly inside row 1's band (≥100 pixels), zero highlight
+/// pixels above the band, and row text pixels inside the same band (highlight
+/// and text overlap — GAP-4); the click must enter Executing through the
+/// re-entrancy-guarded execute path and the runner must run exactly once after
+/// the gate release (GAP-5: the old hover-only sense could never click).
+#[test]
+#[ignore]
+fn palette_hover_click_alignment() {
+    run_check("hover_click_alignment");
+}
