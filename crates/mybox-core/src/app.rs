@@ -312,6 +312,19 @@ impl App {
     /// (RESEARCH §11 #3: dispatch by action name, decoupled from the OS id).
     /// Unknown ids are only logged (T-1-02: never execute arbitrary code).
     fn on_hotkey(&self, e: global_hotkey::GlobalHotKeyEvent) {
+        // GAP-1 root cause: global-hotkey 0.8.0's macOS backend reports BOTH
+        // `kEventHotKeyPressed` and `kEventHotKeyReleased` (every one is
+        // forwarded through `GlobalHotKeyEvent::set_event_handler`) — without
+        // this filter one physical keypress produces two `hotkey.triggered`
+        // bus events, and the palette's toggle logic (summon/close flip)
+        // closes the just-summoned panel on the "release" event. The Windows
+        // backend double-reports as well (platform_impl/windows), so the
+        // filter is correct on Windows too. It also removes the Released
+        // double-report from capture's hotkey (whose re-entrancy guard was
+        // silently absorbing the second trigger).
+        if e.state != global_hotkey::HotKeyState::Pressed {
+            return;
+        }
         match self.hotkeys.action_for_id(e.id) {
             Some(action) => {
                 self.bus.emit(Event {
@@ -702,6 +715,33 @@ mod tests {
         // was published (dispatch is async on the bus worker thread).
         std::thread::sleep(Duration::from_millis(50));
         assert!(seen.lock().is_empty(), "unknown hotkey id must not emit");
+    }
+
+    #[test]
+    fn on_hotkey_released_event_is_ignored() {
+        // GAP-1 regression: global-hotkey 0.8.0's macOS backend reports both
+        // Pressed and Released for one physical keypress. A Released event for
+        // a KNOWN id must not produce a `hotkey.triggered` — otherwise the
+        // palette toggle flips twice per press (summon then instant close).
+        let app = sample_app();
+        app.hotkeys.insert_mapping_for_test(7, "open_test_window");
+
+        let seen: Arc<parking_lot::Mutex<Vec<Event>>> =
+            Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let s = seen.clone();
+        app.bus.on(EventFilter::all(), Box::new(move |e| s.lock().push(e.clone())));
+
+        app.on_hotkey(global_hotkey::GlobalHotKeyEvent {
+            id: 7,
+            state: global_hotkey::HotKeyState::Released,
+        });
+        // Dispatch is async on the bus worker thread; a short wait confirms
+        // nothing was published (same shape as on_hotkey_unknown_id_*).
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            seen.lock().is_empty(),
+            "Released hotkey events must not emit hotkey.triggered"
+        );
     }
 
     #[test]
