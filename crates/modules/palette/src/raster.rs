@@ -94,7 +94,20 @@ pub fn paint(
             let v0 = &mesh.vertices[tri[0] as usize];
             let v1 = &mesh.vertices[tri[1] as usize];
             let v2 = &mesh.vertices[tri[2] as usize];
-            if v0.color == v1.color && v1.color == v2.color {
+            // GAP-2 root cause (was: color equality): glyph triangles share the
+            // text color on ALL three vertices, so a color comparison can never
+            // distinguish them from solid shapes — the font atlas was never
+            // sampled and every text glyph rendered as a solid color block.
+            // The epaint contract is UV: solid meshes always carry
+            // `uv == WHITE_UV` (0,0) plus the default `TextureId::Managed(0)`
+            // (epaint lib.rs:84-88 "use TextureId::Managed(0) and the WHITE_UV
+            // for uv-coord"); any non-WHITE_UV vertex (or a non-default texture
+            // id) means the triangle must go through the textured path.
+            let uses_texture = mesh.texture_id != egui::TextureId::default()
+                || v0.uv != egui::epaint::WHITE_UV
+                || v1.uv != egui::epaint::WHITE_UV
+                || v2.uv != egui::epaint::WHITE_UV;
+            if !uses_texture {
                 paint_solid_triangle(
                     &mut clip_pixmap,
                     v0,
@@ -269,9 +282,18 @@ fn paint_textured_triangle(
             let g = u * f32::from(v0.color.g()) + v * f32::from(v1.color.g()) + wgt * f32::from(v2.color.g());
             let b = u * f32::from(v0.color.b()) + v * f32::from(v1.color.b()) + wgt * f32::from(v2.color.b());
             let a = u * f32::from(v0.color.a()) + v * f32::from(v1.color.a()) + wgt * f32::from(v2.color.a());
-            // Interpolated normalized UV → texel coordinates.
-            let tu = (u * v0.uv.x + v * v1.uv.x + wgt * v2.uv.x) * tex_w as f32;
-            let tv = (u * v0.uv.y + v * v1.uv.y + wgt * v2.uv.y) * tex_h as f32;
+            // Interpolated normalized UV → texel coordinates. The −0.5 maps
+            // into `sample_bilinear`'s convention (texel i occupies [i, i+1)
+            // with its CENTER at i): egui's own renderers (GL_LINEAR sampling)
+            // treat a normalized uv of u as texel-space position `u*size − 0.5`
+            // (texel i's center sits at i+0.5), so an exact 1:1 quad→texel
+            // mapping must sample texel i at position i — without the −0.5 the
+            // sample lands on the texel EDGE and every one-texel glyph stroke
+            // is blurred to half intensity (GAP-2 follow-up found by the
+            // strengthened `paint_renders_chinese_label` test: max glyph alpha
+            // was 204 instead of 255).
+            let tu = (u * v0.uv.x + v * v1.uv.x + wgt * v2.uv.x) * tex_w as f32 - 0.5;
+            let tv = (u * v0.uv.y + v * v1.uv.y + wgt * v2.uv.y) * tex_h as f32 - 0.5;
             let tex = sample_bilinear(image, tu, tv);
 
             // out_premul = tex_straight_premul * vert_premul.
@@ -381,9 +403,129 @@ mod tests {
         let mut framebuffer = tiny_skia::Pixmap::new(600, 128).expect("600x128 pixmap");
         paint(&mut framebuffer, &prims, &textures, full.pixels_per_point);
 
+        // GAP-2 regression (strengthened): a glyph must be a *shape*, not a
+        // solid color block. Non-transparent pixels alone prove nothing — the
+        // old color-equality dispatch painted flat rectangles, which also
+        // produce non-transparent pixels. Structure evidence:
+        // (a) a bbox at least 4 physical pixels wide/tall;
+        // (b) near-full stroke coverage fraction in (0.005, 0.7): real glyph
+        //     strokes are sparse (~1-3% at 14px), a solid block is ≈0.85;
+        // (c) ≥16 distinct RGBA values — antialiased glyph edges produce a
+        //     wide gray ramp, a solid block has ≤3 (fill + AA edge).
+        //
+        // Threshold calibration (03-04, see SUMMARY): "near-full" is alpha
+        // ≥240, not ==255 — 14px CJK strokes are ~1 texel wide and glyphs sit
+        // at fractional subpixel positions, so bilinear sampling almost never
+        // hits exact 1.0 coverage (measured max ≈250; egui's own GL renderer
+        // has the same property). The old solid path paints alpha 255 across
+        // the whole bbox — the 0.7 upper bound is the discriminator.
+        let mut min_x = usize::MAX;
+        let mut min_y = usize::MAX;
+        let mut max_x = 0usize;
+        let mut max_y = 0usize;
+        for (i, p) in framebuffer.data().chunks_exact(4).enumerate() {
+            if p[3] > 0 {
+                let x = i % framebuffer.width() as usize;
+                let y = i / framebuffer.width() as usize;
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+        assert!(min_x != usize::MAX, "Chinese label must produce visible pixels");
+        let bbox_w = max_x - min_x + 1;
+        let bbox_h = max_y - min_y + 1;
         assert!(
-            non_transparent(&framebuffer) > 0,
-            "Chinese label must produce visible pixels"
+            bbox_w >= 4 && bbox_h >= 4,
+            "glyph bbox must be a real shape ({bbox_w}x{bbox_h}, expected ≥4x4 physical px)"
+        );
+        let mut near_full = 0usize;
+        let mut kinds: std::collections::HashSet<[u8; 4]> = std::collections::HashSet::new();
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                let i = (y * framebuffer.width() as usize + x) * 4;
+                let p = &framebuffer.data()[i..i + 4];
+                if p[3] >= 240 {
+                    near_full += 1;
+                }
+                kinds.insert([p[0], p[1], p[2], p[3]]);
+            }
+        }
+        let total = bbox_w * bbox_h;
+        let coverage = near_full as f64 / total as f64;
+        assert!(
+            coverage > 0.005 && coverage < 0.7,
+            "glyph stroke coverage must be sparse (got {coverage:.3}; a solid block is ≈0.85)"
+        );
+        assert!(
+            kinds.len() >= 16,
+            "antialiased glyphs must produce ≥16 distinct RGBA values (got {}; a solid block has ≤3)",
+            kinds.len()
+        );
+    }
+
+    #[test]
+    fn textured_dispatch_uses_uv_not_color() {
+        // GAP-2 RED test: three vertices with IDENTICAL colors (all white —
+        // exactly what egui glyph triangles look like) but non-WHITE_UV
+        // coordinates and a checkerboard texture. The old color-equality
+        // dispatch sent this through the solid path: output was a single flat
+        // white triangle (1 distinct RGBA value). The UV dispatch (epaint
+        // contract: WHITE_UV marks solid meshes) must route it through the
+        // textured path, producing ≥2 distinct values from the checkerboard.
+        let v0 = egui::epaint::Vertex {
+            pos: egui::pos2(10.0, 10.0),
+            uv: egui::pos2(0.0, 0.0),
+            color: egui::Color32::WHITE,
+        };
+        let v1 = egui::epaint::Vertex {
+            pos: egui::pos2(90.0, 10.0),
+            uv: egui::pos2(1.0, 0.0),
+            color: egui::Color32::WHITE,
+        };
+        let v2 = egui::epaint::Vertex {
+            pos: egui::pos2(10.0, 90.0),
+            uv: egui::pos2(0.0, 1.0),
+            color: egui::Color32::WHITE,
+        };
+        let mesh = egui::epaint::Mesh {
+            indices: vec![0, 1, 2],
+            vertices: vec![v0, v1, v2],
+            texture_id: egui::TextureId::Managed(0),
+            ..Default::default()
+        };
+        let prims = vec![egui::ClippedPrimitive {
+            clip_rect: egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 100.0)),
+            primitive: egui::epaint::Primitive::Mesh(mesh),
+        }];
+        let mut textures = HashMap::new();
+        textures.insert(
+            egui::TextureId::Managed(0),
+            egui::epaint::ImageData::Color(Arc::new(egui::epaint::ColorImage {
+                size: [2, 2],
+                pixels: vec![
+                    egui::Color32::WHITE,
+                    egui::Color32::BLACK,
+                    egui::Color32::BLACK,
+                    egui::Color32::WHITE,
+                ],
+            })),
+        );
+        let mut framebuffer = tiny_skia::Pixmap::new(100, 100).expect("100x100 pixmap");
+        paint(&mut framebuffer, &prims, &textures, 1.0);
+
+        let mut kinds: std::collections::HashSet<[u8; 4]> = std::collections::HashSet::new();
+        for p in framebuffer.data().chunks_exact(4) {
+            if p[3] != 0 {
+                kinds.insert([p[0], p[1], p[2], p[3]]);
+            }
+        }
+        assert!(
+            kinds.len() >= 2,
+            "UV dispatch must route equal-color textured triangles through the textured path \
+             (checkerboard yields ≥2 distinct values; the solid path would yield 1), got {}",
+            kinds.len()
         );
     }
 
