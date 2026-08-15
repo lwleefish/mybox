@@ -37,7 +37,7 @@ Requirements for initial release. Each maps to roadmap phases.
 ### Palette
 
 - [x] **PAL-01**: 用户按全局快捷键唤出命令面板浮窗
-- [ ] **PAL-02**: 命令面板列出所有模块注册的命令
+- [x] **PAL-02**: 命令面板列出所有模块注册的命令
 - [x] **PAL-03**: 用户输入关键词模糊过滤命令列表
 - [x] **PAL-04**: 用户通过方向键导航选择命令，回车执行
 - [x] **PAL-05**: 用户按 ESC 关闭命令面板
@@ -110,7 +110,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CAP-07 | Phase 2 | Pending |
 | CAP-08 | Phase 2 | Pending |
 | PAL-01 | Phase 3 | Complete |
-| PAL-02 | Phase 3 | Pending |
+| PAL-02 | Phase 3 | Complete |
 | PAL-03 | Phase 3 | Complete |
 | PAL-04 | Phase 3 | Complete |
 | PAL-05 | Phase 3 | Complete |
@@ -122,4 +122,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-08-11*
-*Last updated: 2026-08-15 — 03-03 gap closure (PAL-01)*
+*Last updated: 2026-08-15 — 03-03/03-04 gap closure (PAL-01, PAL-02)*

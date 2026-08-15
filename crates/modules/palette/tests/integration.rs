@@ -83,3 +83,16 @@ fn palette_five_summon_esc_no_residue() {
 fn palette_consecutive_summon_close() {
     run_check("consecutive_summon_close");
 }
+
+/// Test 6 — real-window glyph rendering (PAL-02 / GAP-2 regression, 03-04):
+/// three frames with Ime::Commit injections between them force incremental
+/// glyph rasterization (partial atlas deltas — the apply_textures in-place
+/// patch path), then asserts the frame diff > 0 and glyph STRUCTURE on the
+/// final framebuffer (bbox ≥8x8, sparse coverage <0.7, ≥16 distinct values,
+/// ≥1 fully-covered pixel) — the direct regression of "all text renders as
+/// solid gray blocks".
+#[test]
+#[ignore]
+fn palette_glyph_shape() {
+    run_check("glyph_shape");
+}

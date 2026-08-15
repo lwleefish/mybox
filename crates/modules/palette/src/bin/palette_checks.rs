@@ -833,6 +833,247 @@ fn check_consecutive_summon_close() -> Result<(), String> {
     run_harness(harness, &ui_proxy)
 }
 
+// ─── Check 6: glyph structure + incremental atlas patches (GAP-2) ───────────
+
+/// Glyph-structure statistics over a premultiplied RGBA8 framebuffer (the
+/// GAP-2 probe). The framebuffer is a COMPOSITED image (opaque #202020 card +
+/// solid chrome fills + text), so alpha-based metrics cannot discriminate
+/// glyphs from solid blocks (everything is opaque). Measures:
+///
+/// - text-pixel count and bbox (non-chrome, non-card pixels);
+/// - distinct RGBA values among text pixels (guards catastrophic texture
+///   failures — a frame without any texture diversity stays in single digits);
+/// - `aa_spread`: the count of MID-TONE (60..245) pixels inside the input
+///   text region (the white-on-#2E2E2E input box) — antialiased glyph stroke
+///   edges. Calibrated on this DPI/font (03-04 SUMMARY): real glyphs ≈242,
+///   the old solid-block bug ≈40 (rectangle-boundary AA only) — the ≥120
+///   threshold is the solid-block discriminator.
+///
+/// `scale` = physical/logical pixel ratio (framebuffer width / panel width).
+#[allow(clippy::type_complexity)]
+fn glyph_structure(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    scale: f32,
+) -> (usize, Option<(usize, usize, usize, usize)>, usize, usize) {
+    // ui.rs color tokens: BG #202020 (card), ROW_HOVERED #2E2E2E (input box),
+    // ROW_SELECTED #404040 (selected row).
+    let is_chrome = |p: &[u8]| {
+        (p[0] == 32 && p[1] == 32 && p[2] == 32)
+            || (p[0] == 46 && p[1] == 46 && p[2] == 46)
+            || (p[0] == 64 && p[1] == 64 && p[2] == 64)
+    };
+    let is_text = |p: &[u8]| p[3] > 0 && !is_chrome(p);
+    let mut non_bg = 0usize;
+    let mut min_x = usize::MAX;
+    let mut min_y = usize::MAX;
+    let mut max_x = 0usize;
+    let mut max_y = 0usize;
+    for y in 0..height {
+        for x in 0..width {
+            let i = (y * width + x) * 4;
+            let p = &pixels[i..i + 4];
+            if is_text(p) {
+                non_bg += 1;
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    if min_x == usize::MAX {
+        return (0, None, 0, 0);
+    }
+    let mut kinds = std::collections::HashSet::new();
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let i = (y * width + x) * 4;
+            let p = &pixels[i..i + 4];
+            if is_text(p) {
+                kinds.insert([p[0], p[1], p[2], p[3]]);
+            }
+        }
+    }
+    // Input text region (ui.rs: 12px margin + 48px input box, text inset 12px):
+    // logical x 24..588, y 24..60 — mapped to physical pixels via `scale`.
+    let ix0 = (24.0 * scale) as usize;
+    let iy0 = (24.0 * scale) as usize;
+    let ix1 = ((588.0 * scale) as usize).min(width);
+    let iy1 = ((60.0 * scale) as usize).min(height);
+    let mut aa_spread = 0usize;
+    for y in iy0..iy1 {
+        for x in ix0..ix1 {
+            let i = (y * width + x) * 4;
+            let p = &pixels[i..i + 4];
+            let mx = p[0].max(p[1]).max(p[2]);
+            if (60..=245).contains(&(mx as i32)) {
+                aa_spread += 1;
+            }
+        }
+    }
+    (non_bg, Some((min_x, min_y, max_x, max_y)), kinds.len(), aa_spread)
+}
+
+/// Real-window glyph rendering probe (PAL-02 / GAP-2 regression, 03-04).
+///
+/// Drives three frames with `Ime::Commit` injections between them so NEW
+/// glyphs (not present in the initial UI) are rasterized incrementally —
+/// `TextureAtlas::take_delta` then emits a `partial` delta, exercising the
+/// apply_textures in-place patch path (GAP-2's secondary root cause) in a real
+/// window. Assertions (thresholds calibrated on the real framebuffer — the
+/// composited output is fully opaque, so the discriminator is the mid-tone AA
+/// spread of glyph stroke edges, see `glyph_structure` and the 03-04 SUMMARY):
+///
+/// 1. Frame-3 vs frame-1 pixel diff > 0 — the committed text actually rendered
+///    (proves the partial atlas delta was produced and applied).
+/// 2. Glyph structure on frame 3 (the primary root cause regression: the old
+///    color-equality dispatch painted solid text-color blocks): bbox ≥ 8x8
+///    physical px; ≥16 distinct text RGBA values; `aa_spread` ≥ 120
+///    (real glyphs ≈242, solid blocks ≈40).
+fn check_glyph_shape() -> Result<(), String> {
+    use mybox_core::winit::event::Ime;
+    use mybox_core::winit::keyboard::{Key, NamedKey};
+
+    let session = Arc::new(PaletteSession::new());
+    let handle = Arc::new(WindowManagerHandle::new());
+    let ui_proxy = Arc::new(OnceLock::new());
+    // CJK command names force the glyph path (PAL-02 visual truth).
+    let registry = registry_with(vec![
+        Command {
+            id: "capture.start",
+            name: "开始截图".to_string(),
+            description: "截取屏幕区域".to_string(),
+            keywords: vec!["jietu"],
+            hide_before_execute: true,
+            runner: ok_runner(),
+        },
+        fake_command("builtin.quit", "退出应用", &["quit"], ok_runner()),
+    ]);
+    summon_palette(&session, &handle, &registry, &ui_proxy).map_err(|e| format!("summon: {e}"))?;
+    let spec = expect_create(&handle)?;
+
+    let s = Arc::clone(&session);
+    let ui_lock = Arc::clone(&ui_proxy);
+    let mut stage = 0u8;
+    let mut frame1: Option<Vec<u8>> = None;
+    let harness = PaletteHarness::new(
+        Arc::clone(&session),
+        Arc::clone(&handle),
+        spec,
+        Box::new(move |h, _el, event| {
+            let WindowEvent::RedrawRequested = event else { return Ok(()); };
+            match stage {
+                0 => {
+                    // Frame 1: baseline render — the initial CJK glyphs
+                    // (placeholder + command names) enter the atlas via the
+                    // full delta; snapshot the frame-1 pixels.
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    if h.non_background_pixels() == 0 {
+                        return Err("frame 1 must render glyph pixels".into());
+                    }
+                    frame1 = Some(h.session.with_framebuffer(|fb| {
+                        fb.as_ref().map(|p| p.data().to_vec()).unwrap_or_default()
+                    }));
+                    // Introduce CJK glyphs absent from the initial UI — the
+                    // next frame rasterizes them incrementally (partial atlas
+                    // delta = the GAP-2 secondary path).
+                    h.inject(WindowEvent::Ime(Ime::Commit("测试".to_string())))?;
+                    stage = 1;
+                    Ok(())
+                }
+                1 => {
+                    // Frame 2: renders the committed "测试" glyphs.
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    // Latin glyphs force a further atlas increment.
+                    h.inject(WindowEvent::Ime(Ime::Commit("zz".to_string())))?;
+                    stage = 2;
+                    Ok(())
+                }
+                2 => {
+                    // Frame 3: renders "测试zz" — read the framebuffer and
+                    // assert the GAP-2 regressions.
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    let frame3 = h.session.with_framebuffer(|fb| {
+                        fb.as_ref().map(|p| p.data().to_vec()).unwrap_or_default()
+                    });
+                    let (width, height) = h.session.with_framebuffer(|fb| match fb {
+                        Some(p) => (p.width() as usize, p.height() as usize),
+                        None => (0, 0),
+                    });
+                    let f1 = frame1.as_ref().expect("frame 1 snapshot");
+                    let diff = f1.iter().zip(&frame3).filter(|(a, b)| a != b).count();
+                    // Physical/logical scale: the framebuffer is 600 logical
+                    // points wide (ui::PANEL_WIDTH).
+                    let scale = width as f32 / mybox_palette::ui::PANEL_WIDTH;
+                    let (non_bg, bbox, kinds, aa_spread) =
+                        glyph_structure(&frame3, width, height, scale);
+                    if diff == 0 {
+                        return Err(format!(
+                            "Ime commits did not change the rendered text (frame diff=0) — \
+                             egui-winit did not translate the injected Ime events; \
+                             measured non_bg={non_bg} bbox={bbox:?} kinds={kinds} \
+                             aa_spread={aa_spread}"
+                        ));
+                    }
+                    let Some((bx0, by0, bx1, by1)) = bbox else {
+                        return Err("frame 3 produced no non-background pixels".into());
+                    };
+                    let bw = bx1 - bx0 + 1;
+                    let bh = by1 - by0 + 1;
+                    let measured = format!(
+                        "measured bbox={bw}x{bh}@({bx0},{by0}) non_bg={non_bg} \
+                         diff={diff} kinds={kinds} aa_spread={aa_spread}"
+                    );
+                    if bw < 8 || bh < 8 {
+                        return Err(format!(
+                            "glyph bbox too small ({measured}; expected ≥8x8 physical px)"
+                        ));
+                    }
+                    if kinds < 16 {
+                        return Err(format!(
+                            "bbox has too few distinct RGBA values ({measured}; \
+                             a texture-less frame has single digits)"
+                        ));
+                    }
+                    if aa_spread < 120 {
+                        return Err(format!(
+                            "input text region shows no glyph stroke antialiasing \
+                             ({measured}; solid blocks measured ≈40, real glyphs ≈242)"
+                        ));
+                    }
+                    eprintln!("palette_checks glyph_shape: {measured} — glyph structure OK");
+                    press_key(&s, &h.handle, &ui_lock, Key::Named(NamedKey::Escape));
+                    stage = 3;
+                    Ok(())
+                }
+                3 => {
+                    match h.handle.try_recv() {
+                        Some(WindowRequest::Destroy(id)) => {
+                            if Some(id) != h.created_id {
+                                return Err(format!(
+                                    "ESC must destroy the created window ({id} != {:?})",
+                                    h.created_id
+                                ));
+                            }
+                        }
+                        // Drain Redraw stragglers; keep polling.
+                        _ => return Ok(()),
+                    }
+                    if s.state() != PaletteState::Hidden {
+                        return Err("ESC must move the session to Hidden".into());
+                    }
+                    h.pass();
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
+        }),
+    );
+    run_harness(harness, &ui_proxy)
+}
+
 // ─── Entry point (exit 0 ok / 1 fail / 2 usage — 02-04 discipline) ──────────
 
 fn main() {
@@ -843,9 +1084,10 @@ fn main() {
         "capture_hides_first" => check_capture_hides_palette_first(),
         "five_summon_esc_no_residue" => check_five_summon_esc_no_residue(),
         "consecutive_summon_close" => check_consecutive_summon_close(),
+        "glyph_shape" => check_glyph_shape(),
         _ => {
             eprintln!(
-                "usage: palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close>"
+                "usage: palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close|glyph_shape>"
             );
             std::process::exit(2);
         }
