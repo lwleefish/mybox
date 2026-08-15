@@ -38,9 +38,9 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [ ] **PAL-01**: 用户按全局快捷键唤出命令面板浮窗
 - [ ] **PAL-02**: 命令面板列出所有模块注册的命令
-- [ ] **PAL-03**: 用户输入关键词模糊过滤命令列表
-- [ ] **PAL-04**: 用户通过方向键导航选择命令，回车执行
-- [ ] **PAL-05**: 用户按 ESC 关闭命令面板
+- [x] **PAL-03**: 用户输入关键词模糊过滤命令列表
+- [x] **PAL-04**: 用户通过方向键导航选择命令，回车执行
+- [x] **PAL-05**: 用户按 ESC 关闭命令面板
 
 ## v2 Requirements
 
@@ -111,9 +111,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CAP-08 | Phase 2 | Pending |
 | PAL-01 | Phase 3 | Pending |
 | PAL-02 | Phase 3 | Pending |
-| PAL-03 | Phase 3 | Pending |
-| PAL-04 | Phase 3 | Pending |
-| PAL-05 | Phase 3 | Pending |
+| PAL-03 | Phase 3 | Complete |
+| PAL-04 | Phase 3 | Complete |
+| PAL-05 | Phase 3 | Complete |
 
 **Coverage:**
 - v1 requirements: 23 total
