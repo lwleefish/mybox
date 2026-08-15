@@ -105,7 +105,10 @@ impl BuiltinCommands {
                 id: "builtin.quit",
                 name: "退出应用".to_string(),
                 description: "退出 mybox 应用".to_string(),
-                keywords: vec!["退出", "quit", "exit"],
+                // GAP-7: pinyin aliases let users hit the Chinese command name
+                // without an IME (same keyword-tier mechanism as capture's
+                // "jietu" — pure data, no code-path change).
+                keywords: vec!["退出", "quit", "exit", "tuichu"],
                 hide_before_execute: false,
                 runner: {
                     // Clone before closure creation: the runner is `Fn` (may be
@@ -128,7 +131,7 @@ impl BuiltinCommands {
                 id: "builtin.open_config",
                 name: "打开配置目录".to_string(),
                 description: "在文件管理器中打开 mybox 配置目录".to_string(),
-                keywords: vec!["配置", "config"],
+                keywords: vec!["配置", "config", "peizhi"],
                 hide_before_execute: false,
                 runner: {
                     let opener = Arc::clone(&opener);
@@ -144,7 +147,7 @@ impl BuiltinCommands {
                 id: "builtin.restart",
                 name: "重启应用".to_string(),
                 description: "重启 mybox 应用".to_string(),
-                keywords: vec!["重启", "restart"],
+                keywords: vec!["重启", "restart", "chongqi"],
                 hide_before_execute: false,
                 runner: {
                     let bus = Arc::clone(&bus);
@@ -173,7 +176,7 @@ impl BuiltinCommands {
                 id: "builtin.open_log",
                 name: "打开日志文件".to_string(),
                 description: "打开 mybox 运行日志".to_string(),
-                keywords: vec!["日志", "log"],
+                keywords: vec!["日志", "log", "rizhi"],
                 hide_before_execute: false,
                 runner: {
                     let opener = Arc::clone(&opener);
@@ -431,6 +434,38 @@ mod tests {
             assert!(!cmd.name.is_empty(), "{}: name must be non-empty", cmd.id);
             assert!(!cmd.description.is_empty(), "{}: description must be non-empty", cmd.id);
         }
+    }
+
+    #[test]
+    fn builtin_keywords_include_pinyin_aliases() {
+        // GAP-7 prefix discovery: without an IME (or with the OS IME
+        // disabled) users must still be able to hit the Chinese builtins via
+        // pinyin — the same keyword-tier data mechanism as capture's "jietu".
+        // This test locks the data so the aliases can never silently drop.
+        let cmds = builtins();
+        let quit = cmds.iter().find(|c| c.id == "builtin.quit").expect("quit exists");
+        assert!(quit.keywords.contains(&"tuichu"), "quit must carry the tuichu alias");
+        let open_config = cmds
+            .iter()
+            .find(|c| c.id == "builtin.open_config")
+            .expect("open_config exists");
+        assert!(
+            open_config.keywords.contains(&"peizhi"),
+            "open_config must carry the peizhi alias"
+        );
+        let restart = cmds
+            .iter()
+            .find(|c| c.id == "builtin.restart")
+            .expect("restart exists");
+        assert!(
+            restart.keywords.contains(&"chongqi"),
+            "restart must carry the chongqi alias"
+        );
+        let open_log = cmds
+            .iter()
+            .find(|c| c.id == "builtin.open_log")
+            .expect("open_log exists");
+        assert!(open_log.keywords.contains(&"rizhi"), "open_log must carry the rizhi alias");
     }
 
     #[test]
