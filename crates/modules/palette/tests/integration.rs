@@ -72,3 +72,14 @@ fn palette_capture_hides_first() {
 fn palette_five_summon_esc_no_residue() {
     run_check("five_summon_esc_no_residue");
 }
+
+/// Test 5 — three consecutive summon/close rounds on real windows/event loop:
+/// each round observes ≥2 frames with NO Destroy (the panel stays visible — the
+/// direct PAL-01/GAP-1 flash-close regression), then ESC pairs the Destroy with
+/// zero residue; a final summon is observed for ≥3 frames before the last close
+/// (PAL-01 gap closure, 03-03).
+#[test]
+#[ignore]
+fn palette_consecutive_summon_close() {
+    run_check("consecutive_summon_close");
+}

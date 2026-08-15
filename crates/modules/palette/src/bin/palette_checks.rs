@@ -13,7 +13,7 @@
 //! guards against hangs; the driver is re-entered on a 50ms poll (finalize
 //! hops arrive via `AppEvent::Ui`, so the driver must never block the loop).
 //!
-//! Usage: `palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue>`
+//! Usage: `palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close>`
 //! Exit code 0 on success, 1 on failure, 2 on bad usage.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -81,8 +81,9 @@ impl PaletteHarness {
     /// Create the winit window for the pending spec and register it with the
     /// self-managed WindowManager (OverlayHarness shape, 02-04). Replaces any
     /// previous window (dropping it closes it — its Destroy was already
-    /// asserted by the check). Also pairs the session window id, which is what
-    /// production's `window-created` handler does.
+    /// asserted by the check). Also pairs the session window id through the
+    /// spec's `on_created` callback, which is what production's
+    /// `App::create_window` does via `spec.on_created` (GAP-1 fix).
     fn realize_window(&mut self, el: &ActiveEventLoop) -> Result<(), String> {
         let spec = self
             .pending_spec
@@ -113,7 +114,12 @@ impl PaletteHarness {
         self.window = Some(window);
         self.current_winit_id = Some(winit_id);
         self.created_id = Some(id);
-        self.session.set_window_id(id);
+        // Production pairing path (GAP-1): the on_created closure captures
+        // only Arc clones of the session/windows, so borrowing `spec` from
+        // `pending_spec` never touches the harness itself.
+        if let Some(cb) = &spec.on_created {
+            cb(id);
+        }
         Ok(())
     }
 
@@ -700,6 +706,133 @@ fn check_five_summon_esc_no_residue() -> Result<(), String> {
     run_harness(harness, &ui_proxy)
 }
 
+// ─── Check 5: consecutive summon/close rounds keep the panel visible ────────
+
+/// Consecutive summon/close rounds with REAL windows and a REAL event loop:
+/// 3× (summon → on_created pairing → observe ≥2 frames with NO Destroy in the
+/// queue — the panel STAYS visible, the direct regression of GAP-1's
+/// flash-close → ESC → paired Destroy with zero residue), then a final summon
+/// observed for ≥3 frames before the last close.
+///
+/// Coverage statement (kept honest): the probe drives summoning through
+/// `summon_palette` at the bus level, NOT through the OS physical-hotkey path
+/// — truth #1's single-toggle-per-press behavior is locked by the Task 1 unit
+/// test (`on_hotkey_released_event_is_ignored`) and re-verified by human UAT
+/// test 1 on the desktop. This probe's coverage is limited to: consecutive
+/// summon/close cycles pair builds and destroys correctly with no residue,
+/// and the final summon stays visible.
+fn check_consecutive_summon_close() -> Result<(), String> {
+    use mybox_core::winit::keyboard::{Key, NamedKey};
+
+    let session = Arc::new(PaletteSession::new());
+    let handle = Arc::new(WindowManagerHandle::new());
+    let ui_proxy = Arc::new(OnceLock::new());
+    let registry = registry_with(vec![
+        fake_command("c0", "Alpha One", &[], ok_runner()),
+        fake_command("c1", "Beta Two", &[], ok_runner()),
+        fake_command("c2", "Gamma Three", &[], ok_runner()),
+        fake_command("c3", "Delta Four", &[], ok_runner()),
+        fake_command("c4", "Epsilon Five", &[], ok_runner()),
+    ]);
+    summon_palette(&session, &handle, &registry, &ui_proxy).map_err(|e| format!("summon: {e}"))?;
+    let spec = expect_create(&handle)?;
+
+    let s = Arc::clone(&session);
+    let h = Arc::clone(&handle);
+    let ui_lock = Arc::clone(&ui_proxy);
+    let registry_lock = Arc::clone(&registry);
+    let mut round: usize = 0; // 0..=2 loop rounds, 3 = final summon round
+    let mut phase = 0u8; // 0 = observe frames (no Destroy); 1 = expect Destroy after ESC
+    let mut frames = 0u32; // observed RedrawRequested frames in the current phase-0 stretch
+    let harness = PaletteHarness::new(
+        Arc::clone(&session),
+        Arc::clone(&handle),
+        spec,
+        Box::new(move |harness, el, event| {
+            let WindowEvent::RedrawRequested = event else { return Ok(()); };
+            if round >= 4 {
+                // All rounds (3 loop + 1 final) closed; residue assertions ran
+                // in the last Destroy arm.
+                if s.state() != PaletteState::Hidden {
+                    return Err("session must end Hidden after the final close".into());
+                }
+                if s.has_live_window() {
+                    return Err("no live window may survive the final close".into());
+                }
+                harness.pass();
+                return Ok(());
+            }
+            match phase {
+                0 => {
+                    // Observation phase: while frames elapse the panel must
+                    // STAY — no Destroy may be enqueued and the pairing must
+                    // point at the current window (GAP-1 flash-close).
+                    while let Some(req) = h.try_recv() {
+                        if matches!(req, WindowRequest::Destroy(_)) {
+                            return Err(format!(
+                                "round {round}: Destroy enqueued while the panel must stay visible"
+                            ));
+                        }
+                    }
+                    let created = harness.created_id.ok_or("window id missing")?;
+                    if s.window_id() != Some(created) {
+                        return Err(format!(
+                            "round {round}: session.window_id() == {:?}, expected {created}",
+                            s.window_id()
+                        ));
+                    }
+                    if s.state() != PaletteState::Idle {
+                        return Err(format!(
+                            "round {round}: state must be Idle, got {:?}",
+                            s.state()
+                        ));
+                    }
+                    frames += 1;
+                    let needed: u32 = if round == 3 { 3 } else { 2 };
+                    if frames >= needed {
+                        press_key(&s, &h, &ui_lock, Key::Named(NamedKey::Escape));
+                        phase = 1;
+                    }
+                    Ok(())
+                }
+                1 => match h.try_recv() {
+                    Some(WindowRequest::Destroy(id)) => {
+                        let created = harness.created_id.ok_or("window id missing")?;
+                        if id != created {
+                            return Err(format!("round {round}: Destroy({id}) != {created}"));
+                        }
+                        if s.state() != PaletteState::Hidden {
+                            return Err(format!("round {round}: session must be Hidden after ESC"));
+                        }
+                        if s.has_live_window() {
+                            return Err(format!("round {round}: no live window may remain"));
+                        }
+                        if s.consume_pending_close() {
+                            return Err(format!("round {round}: pending_close residue"));
+                        }
+                        round += 1;
+                        frames = 0;
+                        phase = 0;
+                        if round < 4 {
+                            // Next summon through the production path.
+                            summon_palette(&s, &h, &registry_lock, &ui_lock)
+                                .map_err(|e| format!("round {round}: summon: {e}"))?;
+                            let spec = expect_create(&h)?;
+                            harness.pending_spec = Some(spec);
+                            harness.realize_window(el)?;
+                        }
+                        Ok(())
+                    }
+                    // Drain Redraw stragglers; keep polling.
+                    _ => Ok(()),
+                },
+                _ => Ok(()),
+            }
+        }),
+    );
+    run_harness(harness, &ui_proxy)
+}
+
 // ─── Entry point (exit 0 ok / 1 fail / 2 usage — 02-04 discipline) ──────────
 
 fn main() {
@@ -709,9 +842,10 @@ fn main() {
         "fuzzy_navigation_execute" => check_fuzzy_navigation_execute(),
         "capture_hides_first" => check_capture_hides_palette_first(),
         "five_summon_esc_no_residue" => check_five_summon_esc_no_residue(),
+        "consecutive_summon_close" => check_consecutive_summon_close(),
         _ => {
             eprintln!(
-                "usage: palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue>"
+                "usage: palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close>"
             );
             std::process::exit(2);
         }
