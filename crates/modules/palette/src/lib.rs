@@ -7,6 +7,7 @@
 //! orphan windows survive a fast toggle (the Phase 2 re-entrancy lesson
 //! generalized).
 
+pub mod execute;
 pub mod filter;
 pub mod fonts;
 pub mod position;
@@ -189,13 +190,15 @@ fn summon_palette(
 
 /// Build the Floating window spec with the full render chain:
 /// `on_event_win` runs the egui-winit frame loop (event translation → egui run
-/// → tessellate → `raster::paint` into the session framebuffer) and handles
-/// ESC close; `on_draw` blits the framebuffer into the core Pixmap before
-/// `present()`. `pub` so 03-02's `palette_checks` harness can reuse it.
+/// → tessellate → `raster::paint` into the session framebuffer), intercepts
+/// the panel keys (↑/↓/Enter/ESC/Error-any-key) BEFORE the egui-winit
+/// translation, and syncs the window height on input/state changes; `on_draw`
+/// blits the framebuffer into the core Pixmap before `present()`. `pub` so
+/// 03-02's `palette_checks` harness can reuse it.
 ///
 /// The closures capture the injected `ui_proxy` (an `Arc<OnceLock<UiThreadProxy>>`):
-/// 03-01 does not consume it yet — 03-02's Enter-execute path reads it via
-/// `ui_proxy.get()`, so no closure construction changes are needed later.
+/// the Enter arm reads it via `ui_proxy.get()` — unset (headless) skips
+/// execution.
 pub fn build_window_spec(
     session: &Arc<PaletteSession>,
     windows: &Arc<WindowManagerHandle>,
@@ -207,6 +210,8 @@ pub fn build_window_spec(
     let ui_proxy = Arc::clone(ui_proxy);
     // One clone per closure (on_event_win and on_draw below).
     let session_draw = Arc::clone(&session);
+    // Last physical height applied to the window (the sync gate).
+    let last_height = Arc::new(std::sync::Mutex::new(geometry.inner_size.1));
 
     let on_event_win: Option<
         Box<dyn Fn(&Arc<winit::window::Window>, &winit::event::WindowEvent) + Send + Sync>,
@@ -219,7 +224,75 @@ pub fn build_window_spec(
 
         session.ensure_winit_state(window);
 
-        // 1. Translate the winit event into egui input.
+        // 0. Panel key routing — intercepted BEFORE the egui-winit translation
+        // (deterministic ownership: egui may consume TextEdit arrow keys, but
+        // ↑/↓/Enter/ESC belong to the panel). Consumed events never reach egui.
+        if let WindowEvent::KeyboardInput {
+            event:
+                KeyEvent {
+                    logical_key,
+                    state: ElementState::Pressed,
+                    repeat: false,
+                    ..
+                },
+            ..
+        } = event
+        {
+            let mut consumed = false;
+            match logical_key {
+                // D-05: ANY key closes an Error panel. This guard arm MUST sit
+                // before the specific-key arms (match arms try in order; a
+                // failing guard falls through to the next arm) — otherwise
+                // ↑/↓/Enter in Error state would hit the navigation arms first
+                // and get swallowed by their state guards, violating "any key
+                // closes". Error-state ESC also closes via this arm.
+                _ if session.state() == PaletteState::Error => {
+                    close_palette(&session, &windows);
+                    consumed = true;
+                }
+                Key::Named(NamedKey::Escape) => {
+                    // PAL-05: close without executing — Idle/Filtering/Empty.
+                    // Executing ignores ESC (only the global hotkey toggle may
+                    // close mid-run; the runner continues, finalize is
+                    // generation-guarded).
+                    if session.state() != PaletteState::Executing {
+                        close_palette(&session, &windows);
+                        consumed = true;
+                    }
+                }
+                Key::Named(NamedKey::ArrowDown) => {
+                    session.move_selection(1);
+                    repaint(&session, &windows);
+                    consumed = true;
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    session.move_selection(-1);
+                    repaint(&session, &windows);
+                    consumed = true;
+                }
+                Key::Named(NamedKey::Enter) => {
+                    // resolve_execution_target already maps the selection
+                    // through `filtered` — the returned value is the commands()
+                    // index of the highlighted command (or the first entry
+                    // when nothing is selected, SPEC req 5).
+                    if let Some(idx) = session.resolve_execution_target() {
+                        if let Some(cmd) = session.commands().get(idx).cloned() {
+                            if let Some(ui_proxy) = ui_proxy.get() {
+                                execute::execute(&session, ui_proxy, &windows, cmd);
+                            }
+                        }
+                    }
+                    repaint(&session, &windows);
+                    consumed = true;
+                }
+                _ => {}
+            }
+            if consumed {
+                return; // the panel owns these keys — egui never sees them
+            }
+        }
+
+        // 1. Translate the remaining winit events into egui input.
         let resp = session.with_winit_state_mut(|state| {
             state
                 .as_mut()
@@ -229,27 +302,18 @@ pub fn build_window_spec(
         // Pitfall 8: ControlFlow::Wait does not redraw on its own — request a
         // redraw whenever egui asks for one.
         if resp.repaint {
-            if let Some(id) = session.window_id() {
-                windows.redraw(id);
-            }
+            repaint(&session, &windows);
         }
 
-        // PAL-05: ESC closes the panel (full keyboard mapping is 03-02).
-        if let WindowEvent::KeyboardInput {
-            event:
-                KeyEvent {
-                    logical_key: Key::Named(NamedKey::Escape),
-                    state: ElementState::Pressed,
-                    ..
-                },
-            ..
-        } = event
-        {
-            close_palette(&session, &windows);
-        }
-
-        // 2. Frame loop: run egui, rasterize into the session framebuffer.
+        // 2. Frame loop: run egui, rasterize into the session framebuffer,
+        // then sync the window geometry if input/state changed.
         if let WindowEvent::RedrawRequested = event {
+            // Snapshots BEFORE the egui run — ui::draw's TextEdit writeback
+            // (session.set_input) completes inside ctx.run (egui Context::run
+            // is synchronous), so the comparison after the run detects input
+            // and state changes.
+            let prev_input = session.input();
+            let prev_state = session.state();
             let raw = session.with_winit_state_mut(|state| {
                 state
                     .as_mut()
@@ -277,10 +341,12 @@ pub fn build_window_spec(
                     .expect("ensure_winit_state ran")
                     .handle_platform_output(window, full_output.platform_output);
             });
+            if prev_input != session.input() || prev_state != session.state() {
+                sync_window_geometry(window, &session, &last_height);
+                // Pitfall 8: a state/input change must repaint (ControlFlow::Wait).
+                window.request_redraw();
+            }
         }
-
-        // Keep the injection alive for 03-02's execute path.
-        let _ = &ui_proxy;
     }));
 
     let on_draw: Option<Box<dyn Fn(&mut tiny_skia::PixmapMut, u32, u32) + Send + Sync>> =
@@ -309,6 +375,44 @@ pub fn build_window_spec(
         on_event_win,
         on_draw,
         ..Default::default()
+    }
+}
+
+/// Enqueue a redraw for the live palette window (no-op when the window id is
+/// unknown yet).
+fn repaint(session: &PaletteSession, windows: &Arc<WindowManagerHandle>) {
+    if let Some(id) = session.window_id() {
+        windows.redraw(id);
+    }
+}
+
+/// Resize the window to the state-dependent height (UI-SPEC geometry table)
+/// and re-center it on its current monitor — the `position::compute_geometry`
+/// centering math, in physical space. Only acts when the height actually
+/// changed (the gate keeps the window from fighting itself every frame).
+fn sync_window_geometry(
+    window: &winit::window::Window,
+    session: &PaletteSession,
+    last_height: &std::sync::Mutex<u32>,
+) {
+    let logical_h = ui::window_height(session.state(), session.filtered().len().max(1));
+    let scale = window.scale_factor();
+    let physical_h = (logical_h as f64 * scale).round() as u32;
+    let mut last = last_height.lock().unwrap();
+    if *last == physical_h {
+        return;
+    }
+    *last = physical_h;
+    let current = window.inner_size();
+    let new_size = winit::dpi::PhysicalSize::new(current.width.max(1), physical_h.max(1));
+    let _ = window.request_inner_size(new_size);
+    // Re-center on the monitor the window currently lives on (physical space).
+    if let Some(monitor) = window.current_monitor() {
+        let mpos = monitor.position();
+        let msize = monitor.size();
+        let x = mpos.x + (msize.width.saturating_sub(new_size.width) as i32) / 2;
+        let y = mpos.y + (msize.height.saturating_sub(new_size.height) as i32) / 2;
+        window.set_outer_position(winit::dpi::PhysicalPosition::new(x.max(0), y.max(0)));
     }
 }
 
@@ -506,5 +610,86 @@ mod tests {
             toml::Value::String("Ctrl+Alt+Space".to_string()),
         );
         assert_eq!(hotkey_from_config(&config), "Ctrl+Alt+Space");
+    }
+
+    #[test]
+    fn enter_executes_selected_command() {
+        // The Enter path: summon a counting command, run execute directly
+        // (the on_event_win Enter arm calls exactly this), assert Executing +
+        // runner ran, then drive finalize headlessly (the UiThreadProxy has no
+        // loop yet — the completion closure is stashed, so finalize is called
+        // on the session directly, which is what the stashed closure would do).
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (_bus, handle, _ctx) = sample_context();
+        let module = PaletteModule::new();
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let cmd = mybox_core::Command {
+            id: "test.count",
+            name: "counting command".to_string(),
+            description: "test".to_string(),
+            keywords: vec![],
+            hide_before_execute: false,
+            runner: {
+                let c = Arc::clone(&count);
+                Arc::new(move || {
+                    let c = Arc::clone(&c);
+                    Box::pin(async move {
+                        c.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                })
+            },
+        };
+        let gen = module.session.summon(vec![cmd.clone()]);
+        let ui = UiThreadProxy::new();
+        execute::execute(&module.session, &ui, &handle, cmd);
+
+        assert!(wait_until(|| count.load(Ordering::SeqCst) == 1), "runner never ran");
+        assert_eq!(module.session.state(), PaletteState::Executing);
+        module.session.set_window_id(7);
+        let id = module.session.finalize(gen, Ok(()));
+        assert_eq!(id, Some(7), "finalize Ok returns the window to destroy");
+        assert_eq!(module.session.state(), PaletteState::Hidden);
+    }
+
+    #[test]
+    fn hotkey_toggle_during_executing_closes_and_ignores_stale_finalize() {
+        // Executing + hotkey → close (runner continues); re-summon bumps the
+        // generation; the old runner's completion is ignored (Pitfall 3).
+        let (bus, handle, ctx) = sample_context();
+        let module = PaletteModule::new();
+        module.init(&ctx).expect("init registers handlers");
+
+        emit_toggle(&bus);
+        assert!(
+            wait_until(|| matches!(handle.try_recv(), Some(WindowRequest::Create(_)))),
+            "first toggle must summon"
+        );
+        module.session.set_window_id(7);
+
+        // Simulate Enter: transition to Executing with the current generation.
+        let gen1 = module.session.generation();
+        assert!(module.session.set_executing(gen1, "slow.cmd"));
+
+        // Hotkey toggle mid-execution closes the panel (the runner keeps going).
+        emit_toggle(&bus);
+        assert!(
+            wait_until(|| matches!(handle.try_recv(), Some(WindowRequest::Destroy(7)))),
+            "toggle during Executing must close the panel"
+        );
+
+        // Re-summon: a fresh palette with a new generation.
+        emit_toggle(&bus);
+        assert!(
+            wait_until(|| matches!(handle.try_recv(), Some(WindowRequest::Create(_)))),
+            "re-toggle must summon a fresh palette"
+        );
+        let gen2 = module.session.generation();
+        assert!(gen2 > gen1, "generation must advance per summon");
+
+        // The old runner's completion must not touch the new palette.
+        assert_eq!(module.session.finalize(gen1, Ok(())), None, "stale finalize is a no-op");
+        assert_eq!(module.session.state(), PaletteState::Idle, "fresh panel untouched");
     }
 }

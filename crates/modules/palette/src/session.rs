@@ -341,6 +341,68 @@ impl PaletteSession {
         inner.focus_requested = false;
         was
     }
+
+    /// Enter Executing with the given command id. Only Idle/Filtering may
+    /// execute, and only when `gen` matches the current generation (a stale
+    /// execution attempt from a previous palette instance is a no-op) — the
+    /// D-04 anti-reentrancy guard. Returns true when the transition happened.
+    pub fn set_executing(&self, gen: u64, id: &'static str) -> bool {
+        let mut inner = self.state.lock().unwrap();
+        if !matches!(inner.state, PaletteState::Idle | PaletteState::Filtering) {
+            return false;
+        }
+        if gen != inner.generation {
+            return false;
+        }
+        inner.state = PaletteState::Executing;
+        inner.executing_id = Some(id);
+        true
+    }
+
+    /// Runner completion. Guarded by `gen == generation && state == Executing`
+    /// (Pitfall 3 — a stale completion must not touch a re-summoned window and
+    /// must not write errors into a fresh panel).
+    ///
+    /// `Ok` → Hidden; returns the window id to destroy (`None` + pending_close
+    /// when no id was recorded yet — the same pairing semantics as `close()`).
+    /// `Err` → Error state with the formatted message; the window stays (D-05)
+    /// and the executing id is kept (the error block names the command).
+    pub fn finalize(&self, gen: u64, result: mybox_core::anyhow::Result<()>) -> Option<WindowId> {
+        let mut inner = self.state.lock().unwrap();
+        if gen != inner.generation || inner.state != PaletteState::Executing {
+            return None; // stale completion or wrong state — no-op
+        }
+        match result {
+            Ok(()) => {
+                inner.state = PaletteState::Hidden;
+                inner.executing_id = None;
+                inner.error = None;
+                if let Some(id) = inner.window_id.take() {
+                    inner.pending_close = false;
+                    Some(id)
+                } else {
+                    inner.pending_close = true;
+                    None
+                }
+            }
+            Err(e) => {
+                inner.state = PaletteState::Error;
+                inner.error = Some(format!("{e:#}"));
+                None
+            }
+        }
+    }
+
+    /// The id of the command currently executing / that failed (None outside
+    /// Executing/Error — the UI names the command in the status/error lines).
+    pub fn executing_id(&self) -> Option<&'static str> {
+        self.state.lock().unwrap().executing_id
+    }
+
+    /// The formatted error text (Some only in the Error state).
+    pub fn error(&self) -> Option<String> {
+        self.state.lock().unwrap().error.clone()
+    }
 }
 
 impl Default for PaletteSession {
@@ -549,8 +611,90 @@ mod tests {
         s.set_input("zzzz");
         assert_eq!(s.state(), PaletteState::Empty);
         assert_eq!(s.resolve_execution_target(), None, "Empty never executes");
-        // Hidden also resolves to nothing.
-        s.close();
+        // Executing also resolves to nothing (re-entrancy).
+        s.set_input("");
+        assert!(s.set_executing(s.generation(), "a"), "Idle may execute");
+        assert_eq!(s.resolve_execution_target(), None, "Executing never executes");
+        s.finalize(s.generation(), Ok(()));
+        // Hidden resolves to nothing either.
         assert_eq!(s.resolve_execution_target(), None);
+    }
+
+    #[test]
+    fn set_executing_only_from_idle_filtering() {
+        let s = PaletteSession::new();
+        let gen = s.summon(vec![sample_command("a")]);
+        assert!(s.set_executing(gen, "a"), "Idle → Executing");
+        assert_eq!(s.state(), PaletteState::Executing);
+        // Re-entrancy: a second set_executing while Executing is rejected (D-04).
+        assert!(!s.set_executing(gen, "a"), "Executing must not re-execute");
+        s.finalize(gen, Ok(()));
+        // Hidden cannot execute either.
+        assert!(!s.set_executing(gen, "a"), "Hidden must not execute");
+        // A stale generation cannot execute (previous palette instance).
+        let gen2 = s.summon(vec![sample_command("a")]);
+        assert!(!s.set_executing(gen, "a"), "stale generation must not execute");
+        assert_eq!(s.state(), PaletteState::Idle);
+        assert!(s.set_executing(gen2, "a"), "current generation executes");
+    }
+
+    #[test]
+    fn finalize_ok_closes_and_returns_window_id() {
+        let s = PaletteSession::new();
+        let gen = s.summon(vec![sample_command("a")]);
+        s.set_executing(gen, "a");
+        s.set_window_id(7);
+        let id = s.finalize(gen, Ok(()));
+        assert_eq!(id, Some(7), "finalize Ok returns the window id to destroy");
+        assert_eq!(s.state(), PaletteState::Hidden);
+        assert!(!s.has_live_window(), "no residual window after finalize Ok");
+        assert!(!s.consume_pending_close(), "no pending close after a paired finalize");
+    }
+
+    #[test]
+    fn finalize_err_sets_error_state() {
+        let s = PaletteSession::new();
+        let gen = s.summon(vec![sample_command("a")]);
+        s.set_executing(gen, "a");
+        s.set_window_id(7);
+        let err = mybox_core::anyhow::anyhow!("screenshot permission denied");
+        assert_eq!(s.finalize(gen, Err(err)), None, "error keeps the window open (D-05)");
+        assert_eq!(s.state(), PaletteState::Error);
+        assert_eq!(s.error().as_deref(), Some("screenshot permission denied"));
+        assert_eq!(s.executing_id(), Some("a"), "error block names the command");
+        assert_eq!(s.window_id(), Some(7), "the window stays alive for the error display");
+    }
+
+    #[test]
+    fn finalize_stale_generation_is_noop() {
+        // Pitfall 3: the old runner's completion must not destroy the
+        // re-summoned window nor write errors into the fresh panel.
+        let s = PaletteSession::new();
+        let gen1 = s.summon(vec![sample_command("a")]);
+        s.set_executing(gen1, "a");
+        // The user closes mid-execution and re-summons (new generation).
+        let gen2 = s.summon(vec![sample_command("a")]);
+        assert_ne!(gen1, gen2);
+        s.set_window_id(9);
+        assert_eq!(s.finalize(gen1, Ok(())), None, "stale Ok is a no-op");
+        assert_eq!(s.state(), PaletteState::Idle, "fresh panel untouched");
+        assert_eq!(s.finalize(gen1, Err(mybox_core::anyhow::anyhow!("boom"))), None);
+        assert_eq!(s.state(), PaletteState::Idle, "stale Err is a no-op");
+        assert_eq!(s.window_id(), Some(9), "new window survives stale completions");
+    }
+
+    #[test]
+    fn finalize_wrong_state_is_noop() {
+        // A completion arriving outside Executing (e.g. the panel was closed
+        // via ESC/hotkey while the runner continued) must not resurrect state.
+        let s = PaletteSession::new();
+        let gen = s.summon(vec![sample_command("a")]);
+        s.set_executing(gen, "a");
+        s.set_window_id(5);
+        s.close(); // ESC/hotkey mid-execution — runner keeps going
+        assert_eq!(s.state(), PaletteState::Hidden);
+        assert_eq!(s.finalize(gen, Ok(())), None, "wrong state → no-op");
+        assert_eq!(s.state(), PaletteState::Hidden);
+        assert!(!s.has_live_window());
     }
 }
