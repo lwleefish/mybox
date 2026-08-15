@@ -1,106 +1,136 @@
 ---
 phase: 03-命令面板
-reviewed: 2026-08-15T05:35:40Z
+reviewed: 2026-08-15T08:56:45Z
 depth: standard
-files_reviewed: 7
+files_reviewed: 9
 files_reviewed_list:
-  - crates/mybox-core/src/app.rs
-  - crates/mybox-core/src/window.rs
-  - crates/modules/palette/src/lib.rs
-  - crates/modules/palette/src/session.rs
-  - crates/modules/palette/src/raster.rs
   - crates/modules/palette/src/bin/palette_checks.rs
+  - crates/modules/palette/src/lib.rs
+  - crates/modules/palette/src/raster.rs
+  - crates/modules/palette/src/session.rs
+  - crates/modules/palette/src/ui.rs
   - crates/modules/palette/tests/integration.rs
+  - crates/mybox-core/src/app.rs
+  - crates/mybox-core/src/command.rs
+  - crates/mybox-core/src/window.rs
 findings:
   critical: 0
   warning: 4
-  info: 4
-  total: 8
+  info: 5
+  total: 9
 status: issues_found
 ---
 
 # Phase 03: Code Review Report
 
-**Reviewed:** 2026-08-15T05:35:40Z
+**Reviewed:** 2026-08-15T08:56:45Z
 **Depth:** standard
-**Files Reviewed:** 7
+**Files Reviewed:** 9
 **Status:** issues_found
 
 ## Summary
 
-Reviewed the gap-closure work for plans 03-03 (GAP-1) and 03-04 (GAP-2) across the core (`app.rs`, `window.rs`) and the palette module (`lib.rs`, `session.rs`, `raster.rs`, `palette_checks.rs`, `tests/integration.rs`).
+Adversarial review of the complete Phase 3 command-palette implementation across the palette module (`lib.rs`, `session.rs`, `raster.rs`, `ui.rs`, the `palette_checks` binary, integration tests) and the core support files (`app.rs`, `command.rs`, `window.rs`).
 
-**The two gap fixes themselves are correct and well-tested:**
+The implementation is overall high-quality and heavily regression-locked:
 
-- **GAP-1** — `App::on_hotkey` now drops non-`Pressed` `GlobalHotKeyEvent`s before dispatch (regression-locked by `on_hotkey_released_event_is_ignored`), and the build-destroy pairing moved from the broadcast `core/window-created` bus event to the per-window `WindowSpec.on_created` callback, which `App::create_window` invokes on the main thread after `register` but before the broadcast — so a pending close destroys the late window in the same `about_to_wait` drain pass and other modules' windows can never touch the palette session. The state machine's `pending_close`/generation guards make the fast-toggle, close-before-create, and mid-execution re-summon paths sound (verified by tracing `toggle_palette` → `close`/`summon` → `on_window_created` and the FIFO drain order).
-- **GAP-2** — the textured-path dispatch now follows the epaint contract (any non-`WHITE_UV` vertex or non-default `TextureId` ⇒ textured), `apply_textures` patches partial `ImageDelta`s in place with bounds-checked row copies (verified against the epaint 0.30 `TextureAtlas::take_delta` semantics), the per-frame card-background fill prevents stale glyph residue after geometry shrinks, and the E2E `glyph_shape` probe exercises the incremental atlas-patch path with real `Ime::Commit` injections. The rasterizer's premultiplied blend math was hand-verified: the over-blend cannot overflow u8 (the premultiplied invariant `rgb ≤ a` holds through the straight→premultiplied texture multiply), and the −0.5 half-texel UV offset matches GL_LINEAR's texel-center convention.
+- The **rasterizer** (`raster.rs`) is the most scrutinized piece and checks out: the GAP-2 UV-based dispatch follows the epaint contract (`WHITE_UV` + default texture = solid; anything else = textured), the premultiplied blend math was hand-verified (the over-blend cannot overflow u8 because the premultiplied invariant `rgb ≤ a` is preserved through the straight→premultiplied texture multiply), bounds checks are in place, and the −0.5 texel-center UV offset matches GL_LINEAR semantics.
+- The **session state machine** (`session.rs`) guards are sound: generation-guarded `finalize`, `pending_close` build-destroy pairing, bounds-checked in-place texture patching, and the `geometry_revision` counter correctly fixes the old WR-01/WR-02 height-sync and framebuffer-cover regressions.
+- The **GAP-1 pairing path** (`app.rs` `create_window` → `on_created` before the broadcast, drained in the same `about_to_wait` pass) is correct, and the hotkey Pressed-only filter is regression-locked.
+- No secrets, no injection surfaces, no unsafe blocks without SAFETY documentation (the two raw-window-handle `unsafe` blocks in `window.rs` are commented and main-thread-only).
 
-No critical issues were found. Four warnings and four info items follow — three warnings live in code that pre-dates the gap-closure commits (03-01/03-02) but sits in the reviewed files; one warning (WR-03) is a genuine robustness gap in the new GAP-1 pairing design.
+No critical issues. Four warnings follow: one is a genuine GAP-7 regression (IME enable is per-session, not per-window — provable from the code and verified against the vendored egui-winit 0.30 source), one is a session wedge on window-creation failure, and two are latent edge-case inconsistencies.
 
 ## Warnings
 
-### WR-01: Executing/Error state transitions never trigger the window-height sync (clipped UI)
+### WR-01: GAP-7 IME enable and the egui-winit State are per-session, not per-window — IME is likely dead on the second (and later) summons
 
-**File:** `crates/modules/palette/src/lib.rs:260-311` (frame loop), `session.rs`/`execute.rs` transitions
-**Issue:** `sync_window_geometry` only fires when `prev_input != session.input() || prev_state != session.state()` — i.e. when the state changes *during* `egui_ctx.run` (TextEdit writeback → Filtering/Empty). The `Executing` transition happens in the Enter key handler (outside a frame) and the `Error` transition happens in the async finalize hop (also outside a frame), so on the next `RedrawRequested` the before/after snapshot is already `Executing`/`Error` and the comparison is false — the window never resizes. Per the UI-SPEC height table, `Executing` needs `112 + 48·n` vs `Idle/Filtering` `80 + 48·n` (+32 logical px), and `Error` needs 144 vs 128 for a 1-row Idle list (+16 px). Result: during Executing the bottom of the dimmed list is clipped off the card, and the Error block is clipped for small lists. (Pre-existing 03-02 code; surfaced while reviewing the in-scope files.)
-**Fix:** Make geometry sync event-driven rather than frame-diff-driven: call `sync_window_geometry` (or set a "geometry dirty" flag consumed by the next frame) from the Enter arm after `execute::execute`, and from the finalize hop in `execute.rs` when the session enters `Error`. Alternatively, keep the snapshot comparison but persist the *last rendered* state across frames and compare against that instead of a per-frame snapshot.
+**File:** `crates/modules/palette/src/session.rs:130-149` (`summon`), `session.rs:478-503` (`ensure_winit_state`)
+**Issue:** `ensure_winit_state`'s doc contract says the explicit `set_ime_allowed(true)` runs "the first time the window ever receives an event", and GAP-7 exists because egui-winit's focus-driven multi-frame IME sequence is unreliable on the desktop. But both gates are per-*session*, never reset by `summon()` or `close()`:
 
-### WR-02: Framebuffer is allocated once at summon and never resized — any window growth leaves an unpainted strip
+1. `ime_allowed` starts `false` and is set `true` once, forever. Every re-summoned window therefore skips the explicit enable (`enable_ime == false`).
+2. `winit_state` is created on the first window's first event and **never torn down** — re-summoned windows reuse the `egui_winit::State` built against the *old* window, including its `allow_ime` debounce flag.
 
-**File:** `crates/modules/palette/src/lib.rs:179` (`install_framebuffer` at summon only), `lib.rs:314-330` (`on_draw` blits only the framebuffer), `session.rs:301-303`
-**Issue:** `install_framebuffer` is called exactly once, in `summon_palette`, at the Idle height. The `on_draw` closure blits only that framebuffer onto the renderer pixmap, and `TinySkiaSoftbufferRenderer::resize` allocates a fresh *zeroed* pixmap on every `Resized` event. The moment WR-01 is fixed (or any future state makes the window taller than the summon height), the region below the framebuffer is transparent — and softbuffer's macOS backend drops per-pixel alpha, so the strip renders black, not card-background `#202020`. (The `install_framebuffer`-at-summon design is 03-01 code; the per-frame clear added in 03-04 fills only the fixed-size framebuffer, not the whole window.)
-**Fix:** In `on_draw`, fill the entire pixmap with the card color before blitting (`pixmap.fill(tiny_skia::Color::from_rgba8(0x20, 0x20, 0x20, 0xFF))` then `draw_pixmap`), and/or reallocate the framebuffer in `sync_window_geometry` when the physical height changes. Filling the pixmap first is the robust minimal fix — it also covers the transparent-region case on Windows.
+Verified against the vendored egui-winit 0.30.0 source (`lib.rs:848-852`): `handle_platform_output` calls `window.set_ime_allowed()` **only on an `allow_ime` transition**. The standard flow — summon → TextEdit focus (State.allow_ime flips to `true`) → ESC close from Idle → re-summon → new window, TextEdit focused again — produces no transition (`true → true`), so **no code path ever calls `set_ime_allowed(true)` on the second window**, and winit's macOS backend defaults IME to disabled per window. The user cannot type Chinese in the re-summoned palette. (The `five_summon_esc` E2E and human UAT 10 only cover the first summon.) The reused State also carries stale `screen_rect`/focus from the old window — mostly self-healing via Resized events, but the IME flag is not.
 
-### WR-03: A failed window creation wedges `pending_close` and permanently disables the palette toggle
-
-**File:** `crates/modules/palette/src/session.rs:151-176` (`has_live_window`/`close`), `crates/mybox-core/src/app.rs:519-521` (Create failure path)
-**Issue:** The GAP-1 pairing design relies on `on_created` running exactly when the window materializes. If `App::create_window` *fails* (e.g. `el.create_window` error or the renderer factory — softbuffer surface creation can fail — returns `Err`; the App logs and drops the spec at `app.rs:519-521`), `on_created` never runs, so `pending_close` stays `true` forever. `has_live_window()` then returns `true` on every subsequent hotkey press (it includes `pending_close`), `close()` returns `None` (state is already `Hidden`, no `window_id`), and the toggle can never summon again — the palette is dead until the app restarts. There is no timeout or failure notification clearing the flag.
-**Fix:** Give the framework a failure path and wire it into the pairing: e.g. add an optional `on_create_failed: Option<Box<dyn Fn() + Send + Sync>>` (or a `WindowSpec`-level failure callback) invoked in the `create_window` error arm, and have the palette's callback clear `pending_close` (via a small `clear_pending_close()` session method). A cheaper mitigation: `summon()` already resets `pending_close = false`, so any path that lets a summon through unwedges it — but `has_live_window()` currently blocks that path, so the flag must be cleared explicitly on the failure path.
-
-### WR-04: `ImageData::Color` textures are double-premultiplied in the textured path
-
-**File:** `crates/modules/palette/src/raster.rs:31-48` (`texture_pixels`), `raster.rs:299-304` (premultiply in `paint_textured_triangle`)
-**Issue:** `TexturePixels.data` is documented as "Straight RGBA8", and `paint_textured_triangle` treats it as straight (multiplying by `tex[3]/255`). But the `ImageData::Color` arm copies `p.r()/g()/b()/a()` — and `ecolor::Color32` (egui 0.30, verified in the vendored source) stores **premultiplied** sRGBA; `ColorImage.pixels` is a `Vec<Color32>` of premultiplied values. Semi-transparent color textures therefore get multiplied by alpha twice and render too dark. This is latent today (the palette emits only `ImageData::Font` atlas textures, and the gray font path is exact because premultiplied == straight for `r=g=b=a`), but the GAP-2 UV dispatch is what routes *all* non-WHITE_UV meshes through this path — the first image/icon a module tessellates will hit it.
-**Fix:** Convert with `to_srgba_unmultiplied()` in the Color arm:
+**Fix:** Reset the per-window bits on `summon()` (and/or `close()`):
 ```rust
-egui::epaint::ImageData::Color(c) => {
-    let mut data = Vec::with_capacity(c.pixels.len() * 4);
-    for p in &c.pixels {
-        data.extend_from_slice(&p.to_srgba_unmultiplied());
+// in summon(), next to the existing modifiers reset:
+inner.ime_allowed = false;
+inner.winit_state = None;
+```
+This makes `ensure_winit_state` rebuild the State per window and re-run the explicit IME enable per window — matching the documented GAP-7 contract exactly.
+
+### WR-02: Zero-command summon height is computed inconsistently — window jumps 80 → 128 and the fallback block is clipped
+
+**File:** `crates/modules/palette/src/lib.rs:176` vs `lib.rs:491`
+**Issue:** Two height computations disagree on the minimum row count. `summon_palette` sizes the initial window with `ui::window_height(PaletteState::Idle, all.len())` — with an empty registry that is `80 + 48·0 = 80`. The frame loop's `sync_window_geometry` uses `session.filtered().len().max(1)` — for the same state that is `80 + 48·1 = 128`. On the first frame the window jumps 80 → 128 logical px. Worse, the zero-command fallback (`ui.rs:216-227`, "没有可用的命令") needs 48 (input) + 8 (gap) + 64 (block) + 24 (margins) = 144 logical px, so even at 128 its bottom ~16px is clipped. Unreachable in production today only because `AppBuilder::build` always registers the four builtins — but the code explicitly supports the zero-command state (the UI fallback exists), so the mismatch is a latent defect.
+
+**Fix:** Use the same min-count rule at both sites (the `max(1)` semantics is the correct one for the geometry table), e.g. in `summon_palette`:
+```rust
+let height = ui::window_height(PaletteState::Idle, all.len().max(1));
+```
+
+### WR-03: A failed `App::create_window` wedges the palette session permanently — no recovery path exists
+
+**File:** `crates/mybox-core/src/app.rs:518-521` (`about_to_wait` logs the error only), `crates/modules/palette/src/session.rs:183-208` (`has_live_window`/`close`)
+**Issue:** If window creation fails (e.g. `TinySkiaSoftbufferRenderer::new` fails — the renderer is built *before* `spec.on_created.take()` runs at `app.rs:402-406`), the error is only logged. The session was already moved to `Idle` by `summon`, `window_id` is `None`, and `on_created` never fires, so:
+
+- `has_live_window()` stays `true` forever (state `Idle`).
+- The next hotkey toggle takes the close branch: `close()` sees `was_visible == true`, no window id → sets `pending_close = true` and returns `None` — no window will ever arrive to consume it.
+- Every subsequent toggle hits the `else` branch of `close()` (state already `Hidden`, no id, `was_visible == false`) → returns `None`, `pending_close` stays set, and `has_live_window()` keeps returning `true` — so `toggle_palette` can **never summon again**. The palette is dead until app restart.
+
+**Fix:** Give the session a failure path and call it from `about_to_wait`'s error arm, e.g. add `SessionInner::on_create_failed()` (clears `pending_close`, moves `Idle → Hidden`) and, when `create_window` fails, the App cannot know the session — so the minimal robust option is for `WindowSpec` to carry an `on_create_failed` callback, or for `summon_palette`'s session state to reset via a timeout/generation check. At minimum, `close()` should also clear `pending_close` when `was_visible == false` so a later toggle can re-summon.
+
+### WR-04: `sync_window_geometry` resizes the window to 1px when the frame runs in `Hidden` state
+
+**File:** `crates/modules/palette/src/lib.rs:486-504`
+**Issue:** `sync_window_geometry` computes `window_height(session.state(), ...)`; for `PaletteState::Hidden` that is `0.0`, and `physical_h.max(1)` turns it into a **1px** `request_inner_size` plus a 1px framebuffer reallocation. This is reachable: the click-execute path for `hide_before_execute` commands (`ui.rs:415-419` → `execute::execute` → `set_executing` bumps `geometry_revision` → `close()` moves to `Hidden`) all happens *inside* the frame, and the same frame's revision check then runs the sync. The 1px resize is transient (the Destroy drains moments later) and the next summon reinstalls the framebuffer, so there is no lasting corruption — but the window is briefly resized to 1px and the framebuffer reallocated on every `capture.start` execution.
+
+**Fix:** Early-return when there is nothing to size:
+```rust
+fn sync_window_geometry(...) {
+    if session.state() == PaletteState::Hidden {
+        return;
     }
-    TexturePixels { size: c.size, data }
+    ...
 }
 ```
-(The Font arm is correct as-is.)
 
 ## Info
 
-### IN-01: Session doc comment contradicts the actual threading model
+### IN-01: `run_command` panics on the main thread if the worker thread cannot spawn
 
-**File:** `crates/modules/palette/src/session.rs:42-44`
-**Issue:** The `SessionInner` doc claims "the lock is only ever taken on the main thread, so there is zero contention" — false. `toggle_palette` (bus worker thread) calls `has_live_window`/`close`/`summon`/`install_framebuffer`, which all lock the same state mutex concurrently with the main-thread frame loop. No deadlock exists (the bus thread never acquires `egui_ctx`, so the `state → egui_ctx` vs `egui_ctx → state` ordering inversion never forms a cycle), but the comment misleads future maintainers about cross-thread contention and lock-ordering hazards.
-**Fix:** Update the comment to state the actual discipline: the state lock is shared between the main thread (frame loop) and the bus worker thread (toggle/close/summon); `egui_ctx` remains main-thread-only, and lock nesting `state → egui_ctx` (`ensure_winit_state`) must never meet a holder of `egui_ctx` that wants `state`.
+**File:** `crates/mybox-core/src/command.rs:239-245`
+**Issue:** `.expect("spawn command runner thread")` runs synchronously in the `execute` chain (`on_palette_key` Enter → `execute::execute` → `run_command`), which is the main-thread event path. Thread-spawn failure (resource exhaustion) panics the whole app instead of surfacing the D-05 Error state.
+**Fix:** Use `std::thread::Builder::spawn(...)` and on `Err`, hop the failure through `ui.run` so `finalize(gen, Err(...))` renders the Error state instead of panicking.
 
-### IN-02: `WindowSpec.transparent` and `WindowSpec.decorations` are silently ignored
+### IN-02: Opposite lock orderings on `SessionInner` and `egui_ctx` — safe today, fragile tomorrow
 
-**File:** `crates/mybox-core/src/window.rs:198-236` (`window_attributes`), `window.rs:29-64` (pub fields)
-**Issue:** `WindowSpec` exposes public `transparent` and `decorations` fields, but `window_attributes` never reads them — the `kind` profile owns those attributes and overrides them (the function's doc acknowledges this). A module constructing `WindowSpec { kind: Panel, decorations: false, .. }` silently gets decorations. The API invites misuse; only `always_on_top`, `inner_size`, `position`, `cursor_icon`, and `visible` are honored.
-**Fix:** Either remove the two fields (breaking the harness's field-copy code) or assert/log when a spec's `transparent`/`decorations` disagree with its `kind` profile, so the mismatch is visible instead of silent.
+**File:** `crates/modules/palette/src/session.rs:481-490` (state → egui_ctx) vs `crates/modules/palette/src/lib.rs:288-292` (egui_ctx guard held while `ui::draw` locks state)
+**Issue:** `ensure_winit_state` locks the session state and then clones the egui context (state → egui_ctx); the frame loop holds the `egui_ctx()` guard across `egui_ctx.run(...)`, inside which `ui::draw` takes the state lock (egui_ctx → state). The two orderings never nest today (both are main-thread sequential and `ensure_winit_state` releases before the run call), so no live deadlock — but any future code that calls a session method from inside a draw closure while also creating winit state would deadlock. Note that WR-01's fix (rebuilding `winit_state` per window) widens the `ensure_winit_state` lock window.
+**Fix:** Document the invariant on both methods ("never call `ensure_winit_state` while holding `egui_ctx()`"), or build the egui-winit State outside the state lock entirely (clone ctx first, then lock).
 
-### IN-03: `palette_checks` harness leaks prior-round windows; "dropping it closes it" comment is false
+### IN-03: `PaletteHarness::realize_window`'s comment claims dropping the previous window closes it — the harness WindowManager keeps it alive
 
-**File:** `crates/modules/palette/src/bin/palette_checks.rs:87-124` (`realize_window`)
-**Issue:** `realize_window` comments that replacing `self.window` drops the previous window and closes it — but `self.wm.register(...)` stored `Some(Arc::clone(&window))` for every round, and `WindowManager` states are never destroyed, so each prior round's window stays alive (and visible) until process exit. In `five_summon_esc_no_residue` and `consecutive_summon_close`, up to 5 real windows accumulate on screen during the run. This does not affect the assertions (they read the session state and the request queue, and stale windows' events are filtered by `current_winit_id`), but it undermines the "no residue" narrative and could confuse a human watching the test run.
-**Fix:** In `realize_window`, before replacing `self.window`, drain `self.wm` (e.g. `self.wm.close_all()`) so the old window's Arc refcount drops and it actually closes; correct the comment.
+**File:** `crates/modules/palette/src/bin/palette_checks.rs:82-124`
+**Issue:** The comment on `realize_window` says replacing `self.window` "drops it closes it", but `wm.register(id, ..., Some(Arc::clone(&window)), ...)` retains an Arc for every round's window in the self-managed `WindowManager`, and nothing ever calls `wm.destroy`. Replaced windows therefore stay alive (and visible on screen) for the duration of the check. Test-harness-only and harmless to the assertions, but the comment is inaccurate and multi-round checks stack up to 5 live palette windows on the desktop.
+**Fix:** Either call `self.wm.destroy(self.created_id.take()...)` before re-registering, or correct the comment.
 
-### IN-04: Stale assertion criteria in the Test 6 doc comment
+### IN-04: `config_dir().unwrap_or_default()` degrades the config/log builtins to an empty path
 
-**File:** `crates/modules/palette/tests/integration.rs:87-93`
-**Issue:** The doc comment for `palette_glyph_shape` describes thresholds the check no longer uses: "sparse coverage <0.7, ≥1 fully-covered pixel". The actual `check_glyph_shape` probe asserts bbox ≥ 8x8 physical px, ≥16 distinct text RGBA values, and `aa_spread` ≥ 120 (the 03-04 SUMMARY criteria — the composited card is fully opaque, so coverage/alpha metrics were replaced).
-**Fix:** Update the comment to match the implemented criteria (bbox ≥8x8, ≥16 distinct values, aa_spread ≥120, frame diff > 0), and remove the obsolete coverage sentence.
+**File:** `crates/mybox-core/src/app.rs:145-146`
+**Issue:** On config-dir failure, `open_config` opens `""` (macOS `open` with an empty argument errors → the command lands in the Error state) and `open_log` opens the relative path `logs/mybox.log` from the process CWD. The fallback is silently wrong rather than failing loudly.
+**Fix:** Keep the `Option` and have the builtin runners `bail!` with a clear message when the config dir is unavailable, instead of falling back to a bogus path.
+
+### IN-05: 64-char query cap makes pasted long input visibly snap back with no feedback
+
+**File:** `crates/modules/palette/src/ui.rs:175-207` + `crates/modules/palette/src/session.rs:275-301`
+**Issue:** The TextEdit buffer is rebuilt every frame from the *truncated* `session.input()` (Security V5), so pasting >64 chars shows the full paste for exactly one frame and then snaps back to 64 chars — no hint that the input was capped. Spec-compliant (the bound is required), but the silent truncation is a UX wart and can fight IME preedit length.
+**Fix:** Clamp at the widget level too (truncate `text` before it is edited / use a `TextEdit` max-length via `char_limit`) so the cap is visible at the point of input rather than a frame later.
 
 ---
 
-_Reviewed: 2026-08-15T05:35:40Z_
+_Reviewed: 2026-08-15T08:56:45Z_
 _Reviewer: the agent (gsd-code-reviewer)_
 _Depth: standard_
