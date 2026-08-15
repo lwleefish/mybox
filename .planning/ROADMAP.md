@@ -123,7 +123,7 @@ Plans:
 
 **Wave 6** *(gap closure — blocked on Wave 5, shared files)*
 
-- [ ] 03-06: GAP-4/5 修复——行交互重写（content-ui painter + item_spacing 归零 + Sense::click 点击执行 + 行内布局修正 + E2E hover_click_alignment 探针）
+- [x] 03-06: GAP-4/5 修复——行交互重写（content-ui painter + item_spacing 归零 + Sense::click 点击执行 + 行内布局修正 + E2E hover_click_alignment 探针）
 
 **Wave 7** *(gap closure — blocked on Wave 6, shared files)*
 

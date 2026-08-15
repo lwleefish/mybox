@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 03-05-PLAN.md
-last_updated: "2026-08-15T07:53:30.844Z"
+stopped_at: Completed 03-06-PLAN.md
+last_updated: "2026-08-15T08:23:10.680Z"
 last_activity: 2026-08-15
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 16
-  completed_plans: 13
+  completed_plans: 14
   percent: 50
 ---
 
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 03 (命令面板) — EXECUTING
-Plan: 5 of 8
+Plan: 6 of 8
 Status: Ready to execute
 Last activity: 2026-08-15
 
-Progress: [████████░░] 81%
+Progress: [█████████░] 88%
 
 ## Performance Metrics
 
@@ -56,6 +56,7 @@ Progress: [████████░░] 81%
 | Phase 03-命令面板 P03 | 7min | 3 tasks | 7 files |
 | Phase 03-命令面板 P04 | 26min | 3 tasks | 6 files |
 | Phase 03-命令面板 P05 | 12 min | 3 tasks | 4 files |
+| Phase 03-命令面板 P06 | 22 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -78,6 +79,9 @@ Recent decisions affecting current work:
 - [Phase 03-命令面板]: 几何同步触发从帧内快照比较改为 geometry_revision 修订计数（WR-01 修复）：状态转变常发生在帧外（Enter 按键事件 / finalize 经 UiThreadProxy hop），帧内 prev/next 快照永远 prev==current、同步永不触发——修订计数由状态机方法推进，确定性捕获一切几何相关转变
 - [Phase 03-命令面板]: 高度同步只 request_inner_size、绝不 set_outer_position——GAP-3 根因是收缩后重新居中使顶边下移（面板下降漂移）；窗口位置由 summon 时 summon_geometry 决定并保持到窗口销毁
 - [Phase 03-命令面板]: 帧缓冲随窗口高度同步伸缩 resize_framebuffer（WR-02 修复）：窗口增高后新区域可绘制；同尺寸调用保留 Pixmap 实例零分配，分配失败 warn 并保留旧缓冲绝不 panic
+- [Phase 03-命令面板]: 行交互用 ui.interact(Sense::click) + make_persistent_id(('palette-row', cmd.id))——T-03-13 稳定 id；interact 不推进光标，显式 advance_cursor_after_rect 保持 48px 精确打包
+- [Phase 03-命令面板]: 点击执行直接复用 execute::execute（set_executing 防重入守卫拒绝 Executing/Empty/Error 态点击；headless proxy 未注入时跳过，与 on_palette_key Enter 臂同纪律）
+- [Phase 03-命令面板]: 输入区光标改确定性：卡片级 item_spacing.y=0 + allocate_rect 预留 48px + TextEdit 放入 new_child（不推进父光标）——消除 TextEdit 固有高度（~37px）造成的打包漂移
 
 ### Pending Todos
 
@@ -107,6 +111,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-15T07:52:34.759Z
-Stopped at: Completed 03-05-PLAN.md
+Last session: 2026-08-15T08:23:10.669Z
+Stopped at: Completed 03-06-PLAN.md
 Resume file: None
