@@ -98,7 +98,7 @@ Plans:
   4. 用户通过方向键选择命令，回车执行对应功能
   5. 用户按 ESC 关闭命令面板
 
-**Plans**: 4 plans
+**Plans**: 8 plans
 
 Plans:
 **Wave 1**
@@ -116,6 +116,22 @@ Plans:
 **Wave 4** *(blocked on Wave 3 — shared files)*
 
 - [x] 03-04: GAP-2 修复——文字灰色块渲染（raster UV 路径判别 + 图集 partial 补丁 + E2E glyph_shape 探针 + PAL-02 文档同步）
+
+**Wave 5** *(gap closure — blocked on Wave 4, shared files)*
+
+- [ ] 03-05: GAP-3 修复——面板位置漂移（高度同步只缩放不重居中 + 修订计数触发 WR-01 + 帧缓冲随窗伸缩 WR-02 + E2E position_stable_on_filter 探针）
+
+**Wave 6** *(gap closure — blocked on Wave 5, shared files)*
+
+- [ ] 03-06: GAP-4/5 修复——行交互重写（content-ui painter + item_spacing 归零 + Sense::click 点击执行 + 行内布局修正 + E2E hover_click_alignment 探针）
+
+**Wave 7** *(gap closure — blocked on Wave 6, shared files)*
+
+- [ ] 03-07: GAP-6 修复——Ctrl+P/Ctrl+N 导航（ModifiersChanged 修饰键跟踪 + on_palette_key modifiers 参数 + E2E ctrl_pn_navigation 探针）
+
+**Wave 8** *(gap closure — blocked on Wave 7, shared files)*
+
+- [ ] 03-08: GAP-7 修复——中文输入（IME 显式开启 + 内置命令拼音 keywords + E2E ime_commit_updates_input 探针）
 
 ### Phase 4: 跨平台完善
 
@@ -146,5 +162,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 |-------|----------------|--------|-----------|
 | 1. 框架核心 | 4/4 | Complete   | 2026-08-12 |
 | 2. 截图模块 | 4/4 | Complete   | 2026-08-13 |
-| 3. 命令面板 | 4/4 | Complete   | 2026-08-15 |
+| 3. 命令面板 | 4/8 | Complete   | 2026-08-15 |
 | 4. 跨平台完善 | 0/2 | Not started | - |
