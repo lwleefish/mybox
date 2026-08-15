@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 03-02-PLAN.md
-last_updated: "2026-08-15T03:38:02.753Z"
-last_activity: 2026-08-15 -- Phase 03 execution started
+stopped_at: Completed 03-03-PLAN.md
+last_updated: "2026-08-15T03:49:01.003Z"
+last_activity: 2026-08-15
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 12
-  completed_plans: 10
+  completed_plans: 11
   percent: 50
 ---
 
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 03 (命令面板) — EXECUTING
-Plan: 1 of 4
-Status: Executing Phase 03
-Last activity: 2026-08-15 -- Phase 03 execution started
+Plan: 2 of 4
+Status: Ready to execute
+Last activity: 2026-08-15
 
-Progress: [██████████] 100%
+Progress: [█████████░] 92%
 
 ## Performance Metrics
 
@@ -53,6 +53,7 @@ Progress: [██████████] 100%
 
 *Updated after each plan completion*
 | Phase 03-命令面板 P02 | ~55min | 3 tasks | 9 files |
+| Phase 03-命令面板 P03 | 7min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -70,6 +71,7 @@ Recent decisions affecting current work:
 - [Phase 03-命令面板]: Executing 态输入框静态渲染（painter 50% alpha 统一降暗，输入禁用由构造保证） — UI-SPEC disabled 语义需 alpha 而非换色；egui 0.30 Ui 无 opacity API，painter_at+set_opacity 是唯一降暗通道
 - [Phase 03-命令面板]: 高亮索引在 ui::draw 按需重算，session 保持 filtered: Vec<usize> API 不变 — filter 纯函数确定性且廉价；保持 03-01 session API 兼容
 - [Phase 03-命令面板]: Windows 交叉检查受阻项（HotkeyManager 非 Send 延迟注册）记录 Phase 4 — SPEC 验收 10 允许等价检查或记录 Phase 4；修复属核心框架 Rule 4 级改动
+- [Phase 03-命令面板]: Released 热键事件在 App::on_hotkey 入口统一过滤（Pressed 守卫），一次物理按压只产生一次 hotkey.triggered——同时消除 palette/capture 双报 — 建销配对从广播 core/window-created 改为 WindowSpec.on_created 主线程同步回调：配对只作用于面板自己的窗口，pending_close 补销毁与创建同一 drain pass 完成
 
 ### Pending Todos
 
@@ -99,6 +101,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-15T01:48:47.621Z
-Stopped at: Completed 03-02-PLAN.md
+Last session: 2026-08-15T03:48:44.322Z
+Stopped at: Completed 03-03-PLAN.md
 Resume file: None

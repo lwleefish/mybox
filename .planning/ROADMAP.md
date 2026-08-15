@@ -111,7 +111,7 @@ Plans:
 
 **Wave 3** *(gap closure)*
 
-- [ ] 03-03: GAP-1 修复——热键重复唤出失败（core 热键 Pressed-only 过滤 + WindowSpec.on_created 建销配对归属 + E2E consecutive_summon_close 探针 + PAL-01 文档同步）
+- [x] 03-03: GAP-1 修复——热键重复唤出失败（core 热键 Pressed-only 过滤 + WindowSpec.on_created 建销配对归属 + E2E consecutive_summon_close 探针 + PAL-01 文档同步）
 
 **Wave 4** *(blocked on Wave 3 — shared files)*
 
@@ -146,5 +146,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 |-------|----------------|--------|-----------|
 | 1. 框架核心 | 4/4 | Complete   | 2026-08-12 |
 | 2. 截图模块 | 4/4 | Complete   | 2026-08-13 |
-| 3. 命令面板 | 1/2 | In Progress|  |
+| 3. 命令面板 | 3/4 | In Progress|  |
 | 4. 跨平台完善 | 0/2 | Not started | - |
