@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: 框架核心** - 搭建模块化框架基础设施 (completed 2026-08-12)
 - [x] **Phase 2: 截图模块** - 完整截图功能验证框架 (completed 2026-08-13)
-- [ ] **Phase 3: 命令面板** - 统一交互入口
+- [x] **Phase 3: 命令面板** - 统一交互入口 (completed 2026-08-15)
 - [ ] **Phase 4: 跨平台完善** - Windows 适配与打磨
 
 ## Phase Details
@@ -115,7 +115,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 — shared files)*
 
-- [ ] 03-04: GAP-2 修复——文字灰色块渲染（raster UV 路径判别 + 图集 partial 补丁 + E2E glyph_shape 探针 + PAL-02 文档同步）
+- [x] 03-04: GAP-2 修复——文字灰色块渲染（raster UV 路径判别 + 图集 partial 补丁 + E2E glyph_shape 探针 + PAL-02 文档同步）
 
 ### Phase 4: 跨平台完善
 
@@ -146,5 +146,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 |-------|----------------|--------|-----------|
 | 1. 框架核心 | 4/4 | Complete   | 2026-08-12 |
 | 2. 截图模块 | 4/4 | Complete   | 2026-08-13 |
-| 3. 命令面板 | 3/4 | In Progress|  |
+| 3. 命令面板 | 4/4 | Complete   | 2026-08-15 |
 | 4. 跨平台完善 | 0/2 | Not started | - |

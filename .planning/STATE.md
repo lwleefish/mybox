@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 03-03-PLAN.md
-last_updated: "2026-08-15T03:49:01.003Z"
+stopped_at: Completed 03-04-PLAN.md
+last_updated: "2026-08-15T04:19:40.976Z"
 last_activity: 2026-08-15
 progress:
   total_phases: 4
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 12
-  completed_plans: 11
-  percent: 50
+  completed_plans: 12
+  percent: 75
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 03 (命令面板) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-08-15
 
-Progress: [█████████░] 92%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -54,6 +54,7 @@ Progress: [█████████░] 92%
 *Updated after each plan completion*
 | Phase 03-命令面板 P02 | ~55min | 3 tasks | 9 files |
 | Phase 03-命令面板 P03 | 7min | 3 tasks | 7 files |
+| Phase 03-命令面板 P04 | 26min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -72,6 +73,7 @@ Recent decisions affecting current work:
 - [Phase 03-命令面板]: 高亮索引在 ui::draw 按需重算，session 保持 filtered: Vec<usize> API 不变 — filter 纯函数确定性且廉价；保持 03-01 session API 兼容
 - [Phase 03-命令面板]: Windows 交叉检查受阻项（HotkeyManager 非 Send 延迟注册）记录 Phase 4 — SPEC 验收 10 允许等价检查或记录 Phase 4；修复属核心框架 Rule 4 级改动
 - [Phase 03-命令面板]: Released 热键事件在 App::on_hotkey 入口统一过滤（Pressed 守卫），一次物理按压只产生一次 hotkey.triggered——同时消除 palette/capture 双报 — 建销配对从广播 core/window-created 改为 WindowSpec.on_created 主线程同步回调：配对只作用于面板自己的窗口，pending_close 补销毁与创建同一 drain pass 完成
+- [Phase 03-命令面板]: 纹理分派改 UV（WHITE_UV 契约）：字形三角形同色不可靠，epaint 保证 solid mesh uv 恒 WHITE_UV；采样 −0.5 对齐 GL 纹素中心；partial 图集补丁原位写入；E2E 探针改 aa_spread（合成后帧缓冲不透明，alpha 指标无判别力，实测 242 vs 40）
 
 ### Pending Todos
 
@@ -101,6 +103,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-15T03:48:44.322Z
-Stopped at: Completed 03-03-PLAN.md
+Last session: 2026-08-15T04:19:29.392Z
+Stopped at: Completed 03-04-PLAN.md
 Resume file: None
