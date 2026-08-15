@@ -13,6 +13,7 @@ use std::sync::Arc;
 use mybox_core::command::Command;
 use mybox_core::egui;
 use mybox_core::egui_winit;
+use mybox_core::log;
 use mybox_core::tiny_skia;
 use mybox_core::winit;
 use mybox_core::WindowId;
@@ -311,10 +312,33 @@ impl PaletteSession {
     }
 
     /// Merge an egui `TexturesDelta` (font atlas updates) into the texture table.
+    ///
+    /// GAP-2 secondary root cause (was: whole-table replace): epaint's
+    /// `TextureAtlas::take_delta` (texture_atlas.rs) emits
+    /// `ImageDelta::partial(pos, patch, ..)` whenever glyphs are rasterized
+    /// incrementally into the atlas (no resize). Replacing the whole texture
+    /// with the patch corrupted every already-rasterized glyph — UV sampling
+    /// read garbage outside the patch. `Some(pos)` patches are now written in
+    /// place at `pos`; `None` still replaces the whole texture (full delta).
     pub fn apply_textures(&self, delta: egui::TexturesDelta) {
         let mut inner = self.state.lock().unwrap();
         for (id, change) in delta.set {
-            inner.textures.insert(id, change.image);
+            match change.pos {
+                None => {
+                    inner.textures.insert(id, change.image);
+                }
+                Some(pos) => match inner.textures.get_mut(&id) {
+                    Some(existing) => patch_texture_image(existing, &change.image, pos),
+                    // No texture at this id yet — defensive: store the patch as
+                    // the whole image (deterministic, never panic).
+                    None => {
+                        log::warn!(
+                            "palette: partial texture patch for unknown id {id:?} — inserting as full image"
+                        );
+                        inner.textures.insert(id, change.image);
+                    }
+                },
+            }
         }
         for id in delta.free {
             inner.textures.remove(&id);
@@ -432,6 +456,86 @@ impl PaletteSession {
 impl Default for PaletteSession {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Apply an `ImageDelta` patch in place into an existing texture at `[x, y]`
+/// (T-03-05 mitigation: bounds-checked, never panics, never corrupts the
+/// atlas). Same-variant row copies preserve `existing.size`; an out-of-bounds
+/// patch warns and skips (or clips) instead of writing out of bounds; a
+/// variant-mismatched patch (Font↔Color) warns and degrades to a whole-image
+/// replace (deterministic behavior).
+fn patch_texture_image(
+    existing: &mut egui::epaint::ImageData,
+    patch: &egui::epaint::ImageData,
+    pos: [usize; 2],
+) {
+    let [x, y] = pos;
+    match (existing, patch) {
+        (egui::epaint::ImageData::Font(dst), egui::epaint::ImageData::Font(src)) => {
+            // FontImage: single-channel coverage (1 f32 per pixel).
+            let (dst_w, dst_h) = (dst.size[0], dst.size[1]);
+            let (src_w, src_h) = (src.size[0], src.size[1]);
+            let rows = src_h.min(dst_h.saturating_sub(y));
+            let cols = src_w.min(dst_w.saturating_sub(x));
+            if rows == 0 || cols == 0 {
+                log::warn!(
+                    "palette: partial font patch at {pos:?} ({src_w}x{src_h}) \
+                     lies outside the {dst_w}x{dst_h} atlas — skipping patch"
+                );
+                return;
+            }
+            if rows < src_h || cols < src_w {
+                log::warn!(
+                    "palette: partial font patch at {pos:?} clipped \
+                     ({src_w}x{src_h} into {dst_w}x{dst_h} at {x},{y})"
+                );
+            }
+            for row in 0..rows {
+                let dst_off = (y + row) * dst_w + x;
+                let src_off = row * src_w;
+                dst.pixels[dst_off..dst_off + cols]
+                    .copy_from_slice(&src.pixels[src_off..src_off + cols]);
+            }
+        }
+        (egui::epaint::ImageData::Color(dst), egui::epaint::ImageData::Color(src)) => {
+            // ColorImage: straight RGBA8 — same row copy with a 4-byte stride.
+            // `ImageData::Color` holds `Arc<ColorImage>` — `make_mut` clones
+            // the image only when the Arc is shared (the texture table owns
+            // the only reference here).
+            let dst = std::sync::Arc::make_mut(dst);
+            let (dst_w, dst_h) = (dst.size[0], dst.size[1]);
+            let (src_w, src_h) = (src.size[0], src.size[1]);
+            let rows = src_h.min(dst_h.saturating_sub(y));
+            let cols = src_w.min(dst_w.saturating_sub(x));
+            if rows == 0 || cols == 0 {
+                log::warn!(
+                    "palette: partial color patch at {pos:?} ({src_w}x{src_h}) \
+                     lies outside the {dst_w}x{dst_h} image — skipping patch"
+                );
+                return;
+            }
+            if rows < src_h || cols < src_w {
+                log::warn!(
+                    "palette: partial color patch at {pos:?} clipped \
+                     ({src_w}x{src_h} into {dst_w}x{dst_h} at {x},{y})"
+                );
+            }
+            for row in 0..rows {
+                let dst_off = ((y + row) * dst_w + x) * 4;
+                let src_off = row * src_w * 4;
+                let len = cols * 4;
+                dst.pixels[dst_off..dst_off + len]
+                    .copy_from_slice(&src.pixels[src_off..src_off + len]);
+            }
+        }
+        (dst_variant, _src_variant) => {
+            log::warn!(
+                "palette: partial texture patch variant mismatch — \
+                 degrading to whole-image replace"
+            );
+            *dst_variant = patch.clone();
+        }
     }
 }
 
@@ -720,5 +824,147 @@ mod tests {
         assert_eq!(s.finalize(gen, Ok(())), None, "wrong state → no-op");
         assert_eq!(s.state(), PaletteState::Hidden);
         assert!(!s.has_live_window());
+    }
+
+    /// Build a full FontImage delta for `id`.
+    fn full_font_delta(id: egui::TextureId, size: [usize; 2], value: f32) -> (egui::TextureId, egui::epaint::ImageDelta) {
+        (
+            id,
+            egui::epaint::ImageDelta::full(
+                egui::epaint::ImageData::Font(egui::epaint::FontImage {
+                    size,
+                    pixels: vec![value; size[0] * size[1]],
+                }),
+                egui::TextureOptions::LINEAR,
+            ),
+        )
+    }
+
+    #[test]
+    fn apply_textures_patches_partial_font_delta_in_place() {
+        // GAP-2 secondary root cause regression (RED before the fix): a
+        // partial atlas patch must be written in place at `pos` — the old
+        // whole-table replace shrank the stored texture to the patch,
+        // corrupting every already-rasterized glyph. Seed a 4x4 atlas, patch
+        // a 2x2 region at [1,1], and assert untouched texels survive.
+        let s = PaletteSession::new();
+        s.apply_textures(egui::TexturesDelta {
+            set: vec![full_font_delta(egui::TextureId::Managed(0), [4, 4], 0.25)],
+            free: vec![],
+        });
+        s.apply_textures(egui::TexturesDelta {
+            set: vec![(
+                egui::TextureId::Managed(0),
+                egui::epaint::ImageDelta::partial(
+                    [1, 1],
+                    egui::epaint::ImageData::Font(egui::epaint::FontImage {
+                        size: [2, 2],
+                        pixels: vec![0.9; 4],
+                    }),
+                    egui::TextureOptions::LINEAR,
+                ),
+            )],
+            free: vec![],
+        });
+
+        let textures = s.textures();
+        let img = textures
+            .get(&egui::TextureId::Managed(0))
+            .expect("seeded texture must exist");
+        assert!(matches!(img, egui::epaint::ImageData::Font(_)), "Font image");
+        let egui::epaint::ImageData::Font(f) = img else { unreachable!() };
+        assert_eq!(f.size, [4, 4], "patch must preserve the atlas size");
+        let px = |x: usize, y: usize| f.pixels[y * 4 + x];
+        assert_eq!(px(1, 1), 0.9, "patch top-left lands at [1,1]");
+        assert_eq!(px(2, 2), 0.9, "patch bottom-right lands at [2,2]");
+        assert_eq!(px(0, 0), 0.25, "texel outside the patch untouched");
+        assert_eq!(px(3, 3), 0.25, "texel outside the patch untouched");
+        assert_eq!(px(0, 1), 0.25, "same-row texel before the patch untouched");
+        assert_eq!(px(1, 0), 0.25, "same-column texel above the patch untouched");
+    }
+
+    #[test]
+    fn apply_textures_full_delta_replaces_whole_image() {
+        // A full delta (atlas resize) still replaces the whole texture —
+        // size and content become exactly the new image.
+        let s = PaletteSession::new();
+        s.apply_textures(egui::TexturesDelta {
+            set: vec![full_font_delta(egui::TextureId::Managed(0), [4, 4], 0.25)],
+            free: vec![],
+        });
+        s.apply_textures(egui::TexturesDelta {
+            set: vec![full_font_delta(egui::TextureId::Managed(0), [2, 2], 0.5)],
+            free: vec![],
+        });
+
+        let textures = s.textures();
+        let img = textures.get(&egui::TextureId::Managed(0)).expect("texture");
+        assert!(matches!(img, egui::epaint::ImageData::Font(_)), "Font image");
+        let egui::epaint::ImageData::Font(f) = img else { unreachable!() };
+        assert_eq!(f.size, [2, 2], "full delta replaces the whole image");
+        assert!(f.pixels.iter().all(|&p| p == 0.5), "content is the new image");
+    }
+
+    #[test]
+    fn apply_textures_partial_out_of_bounds_patch_clips_and_skips() {
+        // T-03-05: a patch must never write out of bounds. A partially
+        // out-of-bounds patch is clipped (the in-bounds part lands); a wholly
+        // out-of-bounds patch is skipped — the atlas stays intact either way.
+        let s = PaletteSession::new();
+        s.apply_textures(egui::TexturesDelta {
+            set: vec![full_font_delta(egui::TextureId::Managed(0), [4, 4], 0.25)],
+            free: vec![],
+        });
+        // Partially out of bounds: 4x4 patch at [2,2] → only [2..4)x[2..4) fits.
+        s.apply_textures(egui::TexturesDelta {
+            set: vec![(
+                egui::TextureId::Managed(0),
+                egui::epaint::ImageDelta::partial(
+                    [2, 2],
+                    egui::epaint::ImageData::Font(egui::epaint::FontImage {
+                        size: [4, 4],
+                        pixels: vec![0.9; 16],
+                    }),
+                    egui::TextureOptions::LINEAR,
+                ),
+            )],
+            free: vec![],
+        });
+        let textures = s.textures();
+        let egui::epaint::ImageData::Font(f) =
+            textures.get(&egui::TextureId::Managed(0)).expect("texture")
+        else {
+            panic!("Font image expected")
+        };
+        assert_eq!(f.size, [4, 4], "size unchanged after a clipped patch");
+        let px = |x: usize, y: usize| f.pixels[y * 4 + x];
+        assert_eq!(px(2, 2), 0.9, "in-bounds part of the patch lands");
+        assert_eq!(px(3, 3), 0.9, "in-bounds corner lands");
+        assert_eq!(px(1, 1), 0.25, "out-of-patch texel untouched");
+        assert_eq!(px(0, 0), 0.25, "far texel untouched");
+
+        // Wholly out of bounds: patch at [5,5] sized 4x4 → nothing fits.
+        s.apply_textures(egui::TexturesDelta {
+            set: vec![(
+                egui::TextureId::Managed(0),
+                egui::epaint::ImageDelta::partial(
+                    [5, 5],
+                    egui::epaint::ImageData::Font(egui::epaint::FontImage {
+                        size: [4, 4],
+                        pixels: vec![0.7; 16],
+                    }),
+                    egui::TextureOptions::LINEAR,
+                ),
+            )],
+            free: vec![],
+        });
+        let textures = s.textures();
+        let egui::epaint::ImageData::Font(f) =
+            textures.get(&egui::TextureId::Managed(0)).expect("texture")
+        else {
+            panic!("Font image expected")
+        };
+        assert_eq!(f.pixels[3 * 4 + 3], 0.9, "wholly OOB patch skipped — texel intact");
+        assert_eq!(f.size, [4, 4], "size intact after a skipped patch");
     }
 }
