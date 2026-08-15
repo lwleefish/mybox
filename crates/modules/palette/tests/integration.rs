@@ -123,3 +123,16 @@ fn palette_position_stable_on_filter() {
 fn palette_hover_click_alignment() {
     run_check("hover_click_alignment");
 }
+
+/// Test 9 — GAP-6 regression (03-07, PAL-04): on a real window, a REAL
+/// `WindowEvent::ModifiersChanged` injection flows through the production
+/// on_event_win closure into the session modifier tracking, and Ctrl+P /
+/// Ctrl+N route through the key router exactly like ↑/↓ (wrap-around in Idle:
+/// Ctrl+P → last entry, Ctrl+N → index 0), while the unmodified press_key
+/// path (ESC) still closes the panel. The OS physical Ctrl+P keypress → winit
+/// event stream is re-verified by human UAT test 9 on the desktop.
+#[test]
+#[ignore]
+fn palette_ctrl_pn_navigation() {
+    run_check("ctrl_pn_navigation");
+}

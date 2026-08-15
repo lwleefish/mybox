@@ -13,7 +13,7 @@
 //! guards against hangs; the driver is re-entered on a 50ms poll (finalize
 //! hops arrive via `AppEvent::Ui`, so the driver must never block the loop).
 //!
-//! Usage: `palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close|glyph_shape|position_stable_on_filter>`
+//! Usage: `palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close|glyph_shape|position_stable_on_filter|hover_click_alignment|ctrl_pn_navigation>`
 //! Exit code 0 on success, 1 on failure, 2 on bad usage.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -274,6 +274,17 @@ fn press_key(
         &key,
         mybox_core::winit::keyboard::ModifiersState::empty(),
     )
+}
+
+/// Press a key with explicit modifiers (the GAP-6 Ctrl+P/N probe path).
+fn press_key_mods(
+    session: &Arc<PaletteSession>,
+    handle: &Arc<WindowManagerHandle>,
+    ui_proxy: &Arc<OnceLock<UiThreadProxy>>,
+    key: mybox_core::winit::keyboard::Key,
+    mods: mybox_core::winit::keyboard::ModifiersState,
+) -> bool {
+    on_palette_key(session, handle, ui_proxy, &key, mods)
 }
 
 fn fake_command(
@@ -1557,6 +1568,158 @@ fn check_hover_click_alignment() -> Result<(), String> {
     run_harness(harness, &ui_proxy)
 }
 
+// ─── Check 9: Ctrl+P/N navigation equals ↑/↓ (GAP-6, 03-07) ────────────────
+
+/// Real-window Ctrl+P/N navigation probe (PAL-04 / GAP-6, 03-07).
+///
+/// Injects a REAL `WindowEvent::ModifiersChanged` through the production
+/// `on_event_win` closure — the probe's core coverage point is the event
+/// stream → `session.set_modifiers` wiring that production relies on (winit
+/// 0.30's KeyEvent has no modifiers field; the variant carries
+/// `event::Modifiers`, converted via `Modifiers::from(ModifiersState)`).
+/// Then drives the shared key router with Ctrl+P/N and asserts the
+/// ↑/↓-equivalent wrap-around behavior:
+///
+/// - stage 0: baseline Idle frame; inject `ModifiersChanged(CONTROL)` through
+///   the real closure and assert `session.modifiers().control_key()`.
+/// - stage 1: `press_key_mods("p", CONTROL)` in Idle (no selection) wraps to
+///   the LAST entry (Some(2), same as ↑); `press_key_mods("n", CONTROL)` then
+///   wraps back to Some(0) (same as ↓).
+/// - stage 2: inject `ModifiersChanged(empty)` through the real closure and
+///   assert the session state cleared; `press_key(Escape)` (the unmodified
+///   path — press_key regression) closes the panel.
+/// - stage 3: poll for the paired Destroy + Hidden residue assertions.
+///
+/// Coverage statement (kept honest): the probe covers the real
+/// ModifiersChanged → session wiring and the router's Ctrl behavior. The OS
+/// physical Ctrl+P keypress → winit ModifiersChanged/KeyboardInput event
+/// stream is re-verified by human UAT test 9 on the desktop.
+fn check_ctrl_pn_navigation() -> Result<(), String> {
+    use mybox_core::winit::event::Modifiers;
+    use mybox_core::winit::keyboard::{Key, ModifiersState, NamedKey};
+
+    let session = Arc::new(PaletteSession::new());
+    let handle = Arc::new(WindowManagerHandle::new());
+    let ui_proxy = Arc::new(OnceLock::new());
+    // 3 fake commands: Idle with no selection → Ctrl+P wraps to the last (2).
+    let registry = registry_with(vec![
+        fake_command("c0", "Alpha One", &[], ok_runner()),
+        fake_command("c1", "Beta Two", &[], ok_runner()),
+        fake_command("c2", "Gamma Three", &[], ok_runner()),
+    ]);
+    summon_palette(&session, &handle, &registry, &ui_proxy).map_err(|e| format!("summon: {e}"))?;
+    let spec = expect_create(&handle)?;
+
+    let s = Arc::clone(&session);
+    let ui_lock = Arc::clone(&ui_proxy);
+    let mut stage = 0u8;
+    let harness = PaletteHarness::new(
+        Arc::clone(&session),
+        Arc::clone(&handle),
+        spec,
+        Box::new(move |h, _el, event| {
+            let WindowEvent::RedrawRequested = event else { return Ok(()); };
+            match stage {
+                0 => {
+                    // Baseline frame, then the REAL ModifiersChanged event
+                    // flows through the production on_event_win closure into
+                    // session.set_modifiers (the GAP-6 wiring under test).
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    if h.non_background_pixels() == 0 {
+                        return Err("Idle frame must produce non-background pixels".into());
+                    }
+                    h.inject(WindowEvent::ModifiersChanged(Modifiers::from(
+                        ModifiersState::CONTROL,
+                    )))?;
+                    if !s.modifiers().control_key() {
+                        return Err(format!(
+                            "ModifiersChanged(CONTROL) must reach session.modifiers, got {:?}",
+                            s.modifiers()
+                        ));
+                    }
+                    stage = 1;
+                    Ok(())
+                }
+                1 => {
+                    // Ctrl+P in Idle (no selection) is equivalent to ↑: wrap
+                    // to the LAST entry (index 2). Then Ctrl+N wraps forward
+                    // to index 0.
+                    if !press_key_mods(
+                        &s,
+                        &h.handle,
+                        &ui_lock,
+                        Key::Character("p".into()),
+                        ModifiersState::CONTROL,
+                    ) {
+                        return Err("Ctrl+P must be consumed by the router".into());
+                    }
+                    if s.selection() != Some(2) {
+                        return Err(format!(
+                            "Ctrl+P in Idle must wrap to the last entry (↑-equivalent), got {:?}",
+                            s.selection()
+                        ));
+                    }
+                    if !press_key_mods(
+                        &s,
+                        &h.handle,
+                        &ui_lock,
+                        Key::Character("n".into()),
+                        ModifiersState::CONTROL,
+                    ) {
+                        return Err("Ctrl+N must be consumed by the router".into());
+                    }
+                    if s.selection() != Some(0) {
+                        return Err(format!(
+                            "Ctrl+N at the last index must wrap to 0 (↓-equivalent), got {:?}",
+                            s.selection()
+                        ));
+                    }
+                    stage = 2;
+                    Ok(())
+                }
+                2 => {
+                    // Clear the modifiers through the REAL event stream, then
+                    // run the unmodified press_key path (ESC — press_key
+                    // regression: it must still pass ModifiersState::empty()).
+                    h.inject(WindowEvent::ModifiersChanged(Modifiers::from(
+                        ModifiersState::empty(),
+                    )))?;
+                    if s.modifiers() != ModifiersState::empty() {
+                        return Err(format!(
+                            "ModifiersChanged(empty) must clear session.modifiers, got {:?}",
+                            s.modifiers()
+                        ));
+                    }
+                    press_key(&s, &h.handle, &ui_lock, Key::Named(NamedKey::Escape));
+                    stage = 3;
+                    Ok(())
+                }
+                3 => {
+                    match h.handle.try_recv() {
+                        Some(WindowRequest::Destroy(id)) => {
+                            if Some(id) != h.created_id {
+                                return Err(format!(
+                                    "ESC must destroy the created window ({id} != {:?})",
+                                    h.created_id
+                                ));
+                            }
+                        }
+                        // Drain Redraw stragglers; keep polling.
+                        _ => return Ok(()),
+                    }
+                    if s.state() != PaletteState::Hidden {
+                        return Err("ESC must move the session to Hidden".into());
+                    }
+                    h.pass();
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
+        }),
+    );
+    run_harness(harness, &ui_proxy)
+}
+
 // ─── Entry point (exit 0 ok / 1 fail / 2 usage — 02-04 discipline) ──────────
 
 fn main() {
@@ -1570,9 +1733,10 @@ fn main() {
         "glyph_shape" => check_glyph_shape(),
         "position_stable_on_filter" => check_position_stable_on_filter(),
         "hover_click_alignment" => check_hover_click_alignment(),
+        "ctrl_pn_navigation" => check_ctrl_pn_navigation(),
         _ => {
             eprintln!(
-                "usage: palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close|glyph_shape|position_stable_on_filter|hover_click_alignment>"
+                "usage: palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close|glyph_shape|position_stable_on_filter|hover_click_alignment|ctrl_pn_navigation>"
             );
             std::process::exit(2);
         }
