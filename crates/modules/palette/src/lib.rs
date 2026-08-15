@@ -7,6 +7,7 @@
 //! orphan windows survive a fast toggle (the Phase 2 re-entrancy lesson
 //! generalized).
 
+pub mod filter;
 pub mod fonts;
 pub mod position;
 pub mod raster;

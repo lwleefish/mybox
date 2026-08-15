@@ -17,6 +17,8 @@ use mybox_core::tiny_skia;
 use mybox_core::winit;
 use mybox_core::WindowId;
 
+use crate::filter;
+
 /// Palette interaction states (UI-SPEC interaction contract).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaletteState {
@@ -176,6 +178,81 @@ impl PaletteSession {
         self.state.lock().unwrap().input = s.into();
     }
 
+    /// Set the input with filtering (PAL-03, the 03-02 entry point): truncate
+    /// to `filter::MAX_QUERY_LEN` chars (Security V5), then transition —
+    /// trim-empty → Idle (full list, no selection); no matches → Empty;
+    /// matches → Filtering with the selection reset to index 0 (UI-SPEC:
+    /// every input change resets the highlight).
+    pub fn set_input(&self, s: &str) {
+        let mut inner = self.state.lock().unwrap();
+        let truncated: String = s.chars().take(filter::MAX_QUERY_LEN).collect();
+        inner.input = truncated.clone();
+        if truncated.trim().is_empty() {
+            inner.state = PaletteState::Idle;
+            inner.selection = None;
+            inner.filtered = (0..inner.commands.len()).collect();
+            return;
+        }
+        let matches = filter::filter_commands(&inner.commands, &truncated);
+        if matches.is_empty() {
+            inner.state = PaletteState::Empty;
+            inner.selection = None;
+            inner.filtered.clear();
+        } else {
+            inner.state = PaletteState::Filtering;
+            inner.filtered = matches.iter().map(|m| m.cmd_index).collect();
+            inner.selection = Some(0);
+        }
+    }
+
+    /// Move the selection by `delta` in **filtered space** with wrap-around
+    /// (PAL-04). Only Idle/Filtering respond; an empty list and every other
+    /// state are no-ops. With no selection, `↓` (positive delta) selects
+    /// index 0 and `↑` (negative) selects the last entry (UI-SPEC: first ↓ in
+    /// Idle selects index 0).
+    pub fn move_selection(&self, delta: i32) {
+        let mut inner = self.state.lock().unwrap();
+        if !matches!(inner.state, PaletteState::Idle | PaletteState::Filtering) {
+            return;
+        }
+        let len = inner.filtered.len();
+        if len == 0 {
+            return;
+        }
+        inner.selection = Some(match inner.selection {
+            None => {
+                if delta >= 0 {
+                    0
+                } else {
+                    len - 1
+                }
+            }
+            Some(i) => (i as i32 + delta).rem_euclid(len as i32) as usize,
+        });
+    }
+
+    /// The **command index** to execute on Enter: the selected filtered entry,
+    /// else the first filtered entry when nothing is selected (SPEC req 5 —
+    /// Enter with no highlight executes the first command). `None` outside
+    /// Idle/Filtering (never executes from Empty/Executing/Error).
+    ///
+    /// The selected entry is a position in *filtered space* (move_selection
+    /// wraps around it, ui.rs renders rows in filtered order) — it MUST be
+    /// mapped through `filtered` to the commands() index. Using the selection
+    /// directly would execute the wrong command whenever Filtering reorders
+    /// the list (e.g. query "退出" → filtered=[1], selection 0 → must execute
+    /// commands()[1], not commands()[0]).
+    pub fn resolve_execution_target(&self) -> Option<usize> {
+        let inner = self.state.lock().unwrap();
+        match inner.state {
+            PaletteState::Idle | PaletteState::Filtering => inner
+                .selection
+                .and_then(|s| inner.filtered.get(s).copied())
+                .or_else(|| inner.filtered.first().copied()),
+            _ => None,
+        }
+    }
+
     pub fn commands(&self) -> Vec<Command> {
         self.state.lock().unwrap().commands.clone()
     }
@@ -287,6 +364,18 @@ mod tests {
         }
     }
 
+    /// A command with a specific name/description/keywords for filter tests.
+    fn named_command(id: &'static str, name: &str, keywords: &[&'static str]) -> Command {
+        Command {
+            id,
+            name: name.to_string(),
+            description: format!("description of {name}"),
+            keywords: keywords.to_vec(),
+            hide_before_execute: false,
+            runner: Arc::new(|| Box::pin(async { Ok(()) })),
+        }
+    }
+
     #[test]
     fn summon_close_cycle_returns_window_id() {
         let s = PaletteSession::new();
@@ -348,5 +437,120 @@ mod tests {
         assert_eq!(s.input(), "jietu");
         s.summon(cmds);
         assert!(s.input().is_empty(), "summon must reset input");
+    }
+
+    #[test]
+    fn input_transitions_idle_filtering_empty() {
+        let s = PaletteSession::new();
+        s.summon(vec![
+            named_command("capture.start", "开始截图", &["jietu"]),
+            named_command("builtin.quit", "退出应用", &["quit"]),
+        ]);
+        assert_eq!(s.state(), PaletteState::Idle);
+
+        // Matching input → Filtering with the ranked filtered list.
+        s.set_input("截图");
+        assert_eq!(s.state(), PaletteState::Filtering);
+        assert_eq!(s.filtered(), vec![0], "截图 hits 开始截图 only");
+        assert_eq!(s.selection(), Some(0), "selection resets to 0");
+
+        // Non-matching input → Empty with no selection.
+        s.set_input("zzzz");
+        assert_eq!(s.state(), PaletteState::Empty);
+        assert!(s.filtered().is_empty());
+        assert_eq!(s.selection(), None);
+
+        // Cleared (trim-empty) input → Idle with the full list restored.
+        s.set_input("   ");
+        assert_eq!(s.state(), PaletteState::Idle);
+        assert_eq!(s.filtered(), vec![0, 1], "full list restored");
+        assert_eq!(s.selection(), None, "Idle has no highlight");
+    }
+
+    #[test]
+    fn selection_resets_to_zero_on_input_change() {
+        let s = PaletteSession::new();
+        s.summon(vec![
+            named_command("a", "alpha one", &[]),
+            named_command("b", "alpha two", &[]),
+        ]);
+        s.set_input("alpha");
+        assert_eq!(s.selection(), Some(0));
+        s.move_selection(1);
+        assert_eq!(s.selection(), Some(1));
+        // Any input change resets the highlight to index 0.
+        s.set_input("alpha t");
+        assert_eq!(s.selection(), Some(0));
+    }
+
+    #[test]
+    fn move_selection_wraps_both_ends() {
+        let s = PaletteSession::new();
+        s.summon(vec![sample_command("a"), sample_command("b"), sample_command("c")]);
+        // Idle: no selection yet; first ↓ selects index 0 (UI-SPEC).
+        s.move_selection(1);
+        assert_eq!(s.selection(), Some(0), "first ↓ selects index 0");
+        s.move_selection(1);
+        assert_eq!(s.selection(), Some(1));
+        s.move_selection(1);
+        assert_eq!(s.selection(), Some(2));
+        s.move_selection(1);
+        assert_eq!(s.selection(), Some(0), "↓ wraps around at the end");
+        s.move_selection(-1);
+        assert_eq!(s.selection(), Some(2), "↑ wraps around at the start");
+        // Fresh summon: first ↑ selects the last entry.
+        s.summon(vec![sample_command("a"), sample_command("b"), sample_command("c")]);
+        s.move_selection(-1);
+        assert_eq!(s.selection(), Some(2), "first ↑ selects the last entry");
+    }
+
+    #[test]
+    fn resolve_target_maps_through_filtered_indices() {
+        // The Filtering-reorder regression: selection lives in filtered space
+        // and MUST map through `filtered` — executing selection directly would
+        // run the wrong command. filtered == [3, 1] after querying "alpha"
+        // (cmd 3 "alpha" scores above cmd 1 "xxalpha" — earlier match start).
+        let s = PaletteSession::new();
+        s.summon(vec![
+            named_command("zero", "zero", &[]),
+            named_command("xx", "xxalpha", &[]),
+            named_command("beta", "beta", &[]),
+            named_command("alpha", "alpha", &[]),
+        ]);
+        s.set_input("alpha");
+        assert_eq!(s.filtered(), vec![3, 1], "name tier reorders the list");
+        // Selection Some(0) (reset by set_input) → commands()[3].
+        assert_eq!(s.resolve_execution_target(), Some(3));
+        // Selection Some(1) → commands()[1] (NOT commands()[1] by position).
+        s.move_selection(1);
+        assert_eq!(s.selection(), Some(1));
+        assert_eq!(
+            s.resolve_execution_target(),
+            Some(1),
+            "selection must map through filtered"
+        );
+    }
+
+    #[test]
+    fn resolve_target_first_when_no_selection() {
+        // Idle identity case: no highlight → Enter executes the first command
+        // (SPEC req 5). filtered == [0, 1, 2] is the identity mapping, so the
+        // mapping is transparent here — the behavior is the same either way.
+        let s = PaletteSession::new();
+        s.summon(vec![sample_command("a"), sample_command("b"), sample_command("c")]);
+        assert_eq!(s.selection(), None);
+        assert_eq!(s.resolve_execution_target(), Some(0), "no highlight → first command");
+    }
+
+    #[test]
+    fn resolve_target_none_in_empty_and_executing() {
+        let s = PaletteSession::new();
+        s.summon(vec![sample_command("a")]);
+        s.set_input("zzzz");
+        assert_eq!(s.state(), PaletteState::Empty);
+        assert_eq!(s.resolve_execution_target(), None, "Empty never executes");
+        // Hidden also resolves to nothing.
+        s.close();
+        assert_eq!(s.resolve_execution_target(), None);
     }
 }
