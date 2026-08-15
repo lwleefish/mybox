@@ -119,7 +119,7 @@ Plans:
 
 **Wave 5** *(gap closure — blocked on Wave 4, shared files)*
 
-- [ ] 03-05: GAP-3 修复——面板位置漂移（高度同步只缩放不重居中 + 修订计数触发 WR-01 + 帧缓冲随窗伸缩 WR-02 + E2E position_stable_on_filter 探针）
+- [x] 03-05: GAP-3 修复——面板位置漂移（高度同步只缩放不重居中 + 修订计数触发 WR-01 + 帧缓冲随窗伸缩 WR-02 + E2E position_stable_on_filter 探针）
 
 **Wave 6** *(gap closure — blocked on Wave 5, shared files)*
 
@@ -162,5 +162,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 |-------|----------------|--------|-----------|
 | 1. 框架核心 | 4/4 | Complete   | 2026-08-12 |
 | 2. 截图模块 | 4/4 | Complete   | 2026-08-13 |
-| 3. 命令面板 | 4/8 | Complete   | 2026-08-15 |
+| 3. 命令面板 | 5/8 | In Progress|  |
 | 4. 跨平台完善 | 0/2 | Not started | - |

@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 03-04-PLAN.md
-last_updated: "2026-08-15T07:38:56.180Z"
-last_activity: 2026-08-15 -- Phase 03 execution started
+stopped_at: Completed 03-05-PLAN.md
+last_updated: "2026-08-15T07:53:30.844Z"
+last_activity: 2026-08-15
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 16
-  completed_plans: 12
+  completed_plans: 13
   percent: 50
 ---
 
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 03 (命令面板) — EXECUTING
-Plan: 1 of 8
-Status: Executing Phase 03
-Last activity: 2026-08-15 -- Phase 03 execution started
+Plan: 5 of 8
+Status: Ready to execute
+Last activity: 2026-08-15
 
-Progress: [██████████] 100%
+Progress: [████████░░] 81%
 
 ## Performance Metrics
 
@@ -55,6 +55,7 @@ Progress: [██████████] 100%
 | Phase 03-命令面板 P02 | ~55min | 3 tasks | 9 files |
 | Phase 03-命令面板 P03 | 7min | 3 tasks | 7 files |
 | Phase 03-命令面板 P04 | 26min | 3 tasks | 6 files |
+| Phase 03-命令面板 P05 | 12 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -74,6 +75,9 @@ Recent decisions affecting current work:
 - [Phase 03-命令面板]: Windows 交叉检查受阻项（HotkeyManager 非 Send 延迟注册）记录 Phase 4 — SPEC 验收 10 允许等价检查或记录 Phase 4；修复属核心框架 Rule 4 级改动
 - [Phase 03-命令面板]: Released 热键事件在 App::on_hotkey 入口统一过滤（Pressed 守卫），一次物理按压只产生一次 hotkey.triggered——同时消除 palette/capture 双报 — 建销配对从广播 core/window-created 改为 WindowSpec.on_created 主线程同步回调：配对只作用于面板自己的窗口，pending_close 补销毁与创建同一 drain pass 完成
 - [Phase 03-命令面板]: 纹理分派改 UV（WHITE_UV 契约）：字形三角形同色不可靠，epaint 保证 solid mesh uv 恒 WHITE_UV；采样 −0.5 对齐 GL 纹素中心；partial 图集补丁原位写入；E2E 探针改 aa_spread（合成后帧缓冲不透明，alpha 指标无判别力，实测 242 vs 40）
+- [Phase 03-命令面板]: 几何同步触发从帧内快照比较改为 geometry_revision 修订计数（WR-01 修复）：状态转变常发生在帧外（Enter 按键事件 / finalize 经 UiThreadProxy hop），帧内 prev/next 快照永远 prev==current、同步永不触发——修订计数由状态机方法推进，确定性捕获一切几何相关转变
+- [Phase 03-命令面板]: 高度同步只 request_inner_size、绝不 set_outer_position——GAP-3 根因是收缩后重新居中使顶边下移（面板下降漂移）；窗口位置由 summon 时 summon_geometry 决定并保持到窗口销毁
+- [Phase 03-命令面板]: 帧缓冲随窗口高度同步伸缩 resize_framebuffer（WR-02 修复）：窗口增高后新区域可绘制；同尺寸调用保留 Pixmap 实例零分配，分配失败 warn 并保留旧缓冲绝不 panic
 
 ### Pending Todos
 
@@ -103,6 +107,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-15T04:19:29.392Z
-Stopped at: Completed 03-04-PLAN.md
+Last session: 2026-08-15T07:52:34.759Z
+Stopped at: Completed 03-05-PLAN.md
 Resume file: None
