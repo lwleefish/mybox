@@ -13,11 +13,11 @@ mybox 是一个纯 Rust 原生的跨平台（macOS + Windows）桌面工具箱�
 ### Validated
 
 - [x] 模块化框架：Module trait、事件总线、窗口管理、热键系统、配置中心、系统托盘 (Validated in Phase 1: framework - 4 plans, 77 tests passing, Walking Skeleton proven)
+- [x] 命令面板：全局快捷键唤出，作为所有模块的统一交互入口 (Validated in Phase 3: 命令面板 - 10 plans, 233 unit tests + 12 desktop E2E passing, UAT 15/15, 8 blockers + 2 gaps closed)
 
 ### Active
 
 - [ ] 截图模块：屏幕捕获、区域选择、标注工具、Pin 浮窗、剪贴板复制
-- [ ] 命令面板：全局快捷键唤出，作为所有模块的统一交互入口
 - [ ] 跨平台支持：macOS 和 Windows
 
 ### Out of Scope
@@ -76,7 +76,7 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
-Phase 1 complete - 模块化框架基础设施已搭建：Module trait + AppBuilder、EventBus（工作线程分发）、WindowManager（Overlay/Floating/Panel）、HotkeyManager、ConfigCenter、TrayManager、App 事件循环（macOS Accessory 模式）。Walking Skeleton 已验证：热键 -> 事件总线 -> TestModule -> 窗口创建端到端链路。下一步：Phase 2 截图模块。
+Phase 3 complete - 命令面板已交付：全局热键 Cmd+Shift+Space 唤出 Floating 浮窗（egui 渲染），列出全部注册命令，模糊搜索（拼音 keyword 命中 + #FF6000 高亮），键盘导航（↑/↓/Ctrl+P/N/Enter/ESC）与鼠标点击执行。8 个 BLOCKER 修复 + 2 个 UAT gap 关闭（keyword 梯队高亮、点击路径截图时序）。233 unit tests + 12 desktop E2E probes 全绿。剩余 deferred：WR-01/WR-02/WR-03 + IN-01..IN-06 归 Phase 4。下一步：Phase 4 跨平台完善（Windows 适配与打磨）。
 
 ---
-*Last updated: 2026-08-12 after Phase 1 completion*
+*Last updated: 2026-08-17 after Phase 3 completion*
