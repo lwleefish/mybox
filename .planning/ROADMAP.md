@@ -98,7 +98,7 @@ Plans:
   4. 用户通过方向键选择命令，回车执行对应功能
   5. 用户按 ESC 关闭命令面板
 
-**Plans**: 8 plans
+**Plans**: 10 plans
 
 Plans:
 **Wave 1**
@@ -132,6 +132,14 @@ Plans:
 **Wave 8** *(gap closure — blocked on Wave 7, shared files)*
 
 - [x] 03-08: GAP-7 修复——中文输入（IME 显式开启 + 内置命令拼音 keywords + E2E ime_commit_updates_input 探针）
+
+**Wave 9** *(gap closure — blocked on Wave 8, shared files：session.rs/lib.rs/palette_checks.rs/integration.rs)*
+
+- [x] 03-09: GAP-8 / REVIEW WR-01 修复——IME 重唤出复位（summon 复位 ime_allowed=false + winit_state=None 使每窗重新显式开启 + 重建 egui-winit State；探针 ime_commit_updates_input 加 re-summon 阶段断言第二窗口 ime_allowed false→true 翻转；顺带同函数 WR-04 sync_window_geometry Hidden 早退 + WR-02 summon_palette 初始高度 max(1) 与帧循环一致）
+
+**Wave 10** *(gap closure — blocked on Wave 9, shared files)*
+
+- [ ] 03-10: UAT 测试 5 + 测试 11 双 gap 修复——keyword 梯队命中高亮（filter.rs Match.keyword_hit + ui.rs keyword tag 渲染 + UI-SPEC 修订）+ 点击路径截图时序（lib.rs 帧循环 Hidden 守卫 set_visible(false)）+ E2E 探针 keyword_highlight / click_hide_before_capture
 
 ### Phase 4: 跨平台完善
 
