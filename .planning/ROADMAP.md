@@ -139,7 +139,7 @@ Plans:
 
 **Wave 10** *(gap closure — blocked on Wave 9, shared files)*
 
-- [ ] 03-10: UAT 测试 5 + 测试 11 双 gap 修复——keyword 梯队命中高亮（filter.rs Match.keyword_hit + ui.rs keyword tag 渲染 + UI-SPEC 修订）+ 点击路径截图时序（lib.rs 帧循环 Hidden 守卫 set_visible(false)）+ E2E 探针 keyword_highlight / click_hide_before_capture
+- [x] 03-10: UAT 测试 5 + 测试 11 双 gap 修复——keyword 梯队命中高亮（filter.rs Match.keyword_hit + ui.rs keyword tag 渲染 + UI-SPEC 修订）+ 点击路径截图时序（lib.rs 帧循环 Hidden 守卫 set_visible(false)）+ E2E 探针 keyword_highlight / click_hide_before_capture
 
 ### Phase 4: 跨平台完善
 
@@ -170,5 +170,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 |-------|----------------|--------|-----------|
 | 1. 框架核心 | 4/4 | Complete   | 2026-08-12 |
 | 2. 截图模块 | 4/4 | Complete   | 2026-08-13 |
-| 3. 命令面板 | 8/8 | Complete   | 2026-08-15 |
+| 3. 命令面板 | 10/10 | Complete   | 2026-08-17 |
 | 4. 跨平台完善 | 0/2 | Not started | - |

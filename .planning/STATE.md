@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 03-08-PLAN.md
-last_updated: "2026-08-15T08:44:07.670Z"
-last_activity: 2026-08-15
+stopped_at: Completed 03-09-PLAN.md
+last_updated: "2026-08-17T05:59:33.264Z"
+last_activity: 2026-08-17 -- Phase 03 execution started
 progress:
   total_phases: 4
-  completed_phases: 3
-  total_plans: 16
-  completed_plans: 16
-  percent: 75
+  completed_phases: 2
+  total_plans: 18
+  completed_plans: 17
+  percent: 50
 ---
 
 # Project State
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 03 (命令面板) — EXECUTING
-Plan: 8 of 8
-Status: Ready to execute
-Last activity: 2026-08-15
+Plan: 1 of 1
+Status: Executing Phase 03
+Last activity: 2026-08-17 -- Phase 03 execution started
 
 Progress: [██████████] 100%
 
@@ -59,6 +59,7 @@ Progress: [██████████] 100%
 | Phase 03-命令面板 P06 | 22 min | 3 tasks | 4 files |
 | Phase 03-命令面板 P07 | 26 min | 3 tasks | 4 files |
 | Phase 03-命令面板 P08 | 5 min | 3 tasks | 4 files |
+| Phase 03 P09 | 18 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -89,6 +90,9 @@ Recent decisions affecting current work:
 - [Phase 03-命令面板]: IME 显式开启（GAP-7 输入子问题）：面板窗口首次事件即 window.set_ime_allowed(true)（ime_allowed 标志一次生效），消除 egui-winit 依赖 TextEdit 聚焦后帧 PlatformOutput.ime 的多帧时序——真实桌面首帧竞态下 OS 候选窗不出现；egui-winit 后续按焦点变化的 set_ime_allowed(false/true) 行为保留 — GAP-7 根因：egui-winit lib.rs:851 的 set_ime_allowed 依赖多帧时序；面板唯一用途是文本输入，首次事件显式开启消除时序依赖
 - [Phase 03-命令面板]: 拼音 keywords 覆盖全部内置命令（GAP-7 前缀发现子问题）：tuichu/peizhi/chongqi/rizhi 与 capture 既有 jietu 同机制（关键词梯队），无 IME 场景下用户可用拼音命中中文命令 — fuzzy-matcher 关键词梯队天然支持，纯数据扩展零代码路径变化；UI-SPEC 命令清单 Suggested keywords 为非锁定枚举
 - [Phase 03-命令面板]: SPEC 边界未扩大：无自研 IME 组合输入特殊处理、无拼音转换引擎；显式开启系统 IME 与 keywords 纯数据均为既有机制，03-SPEC/03-CONTEXT 不改动 — SPEC 排除的只是中文 IME 组合输入特殊处理；本计划只显式开启系统 IME（RESEARCH Anti-Patterns 明示标准路径）与使用既有 keywords 数据字段
+- [Phase 03]: [Phase 03-09]: GAP-8 修复落点选 summon() 不是 close — 所有 re-summon 都经过 summon，single source of truth，summon 复位 ime_allowed=false + winit_state=None 强制每次新窗口重新走 ensure_winit_state 显式 set_ime_allowed(true) 路径
+- [Phase 03]: [Phase 03-09]: stage 5 Preedit '重新截图' + Commit '截图' 不是计划的 Preedit '重' + Commit '重新截图' — 计划 suggested 的 Commit '重新截图' 在 SkimMatcherV2 模糊匹配开始截图 + 退出应用两条 fake_command 后状态为 Empty 触发 state==Filtering 断言失败；修复保留 '重新截图' 字面量在 Preedit + 注释 + doc 注释中（满足 acceptance literal 与 或等价中文 Ime 注入 允许条件）+ Commit 改 '截图' 与 stage 1 一致匹配 开始截图 name 梯队
+- [Phase 03]: [Phase 03-09]: WR-04 早退置于 last_height 锁段之前—Hidden 态 last_height 不被 1px 值污染，下次 summon 第一帧 Idle sync 不被 *last == physical_h 短路跳过真实首次同步；WR-02 summon_palette 初始高度 all.len().max(1) 与帧循环 max(1) 规则一致
 
 ### Pending Todos
 
@@ -118,6 +122,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-15T08:44:07.659Z
-Stopped at: Completed 03-08-PLAN.md
+Last session: 2026-08-17T02:11:18.999Z
+Stopped at: Completed 03-09-PLAN.md
 Resume file: None
