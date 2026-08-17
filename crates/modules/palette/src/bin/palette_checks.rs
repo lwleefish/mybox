@@ -13,7 +13,7 @@
 //! guards against hangs; the driver is re-entered on a 50ms poll (finalize
 //! hops arrive via `AppEvent::Ui`, so the driver must never block the loop).
 //!
-//! Usage: `palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close|glyph_shape|position_stable_on_filter|hover_click_alignment|ctrl_pn_navigation|ime_commit_updates_input>`
+//! Usage: `palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close|glyph_shape|position_stable_on_filter|hover_click_alignment|ctrl_pn_navigation|ime_commit_updates_input|keyword_highlight|click_hide_before_capture>`
 //! Exit code 0 on success, 1 on failure, 2 on bad usage.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2038,6 +2038,468 @@ fn check_ime_commit_updates_input() -> Result<(), String> {
     run_harness(harness, &ui_proxy)
 }
 
+// ─── Check 11: keyword-tier tag highlight (Gap 1 / UAT test 5, 03-10) ───────
+
+/// Count exact ACCENT (#FF6000) pixels inside row 1's band (logical y
+/// 68..116 — the input box 12..60 + 8px gap, 48px rows) of the session
+/// framebuffer. The keyword tag's matched glyphs (e.g. " · jietu"'s j/t)
+/// render the pure ACCENT color in their interiors (opaque glyph coverage →
+/// premultiplied == straight) — the Gap 1 render evidence (UAT test 5).
+fn accent_pixels_in_row_band(h: &PaletteHarness, scale: f64) -> usize {
+    let (width, height, data) = h.session.with_framebuffer(|fb| match fb {
+        Some(p) => (p.width(), p.height(), p.data().to_vec()),
+        None => (0, 0, vec![]),
+    });
+    let y_top = (68.0 * scale).round() as usize;
+    let y_bottom = (116.0 * scale).round() as usize;
+    let mut n = 0usize;
+    for y in y_top..y_bottom.min(height as usize) {
+        for x in 0..width as usize {
+            let i = (y * width as usize + x) * 4;
+            if data[i] == 0xFF && data[i + 1] == 0x60 && data[i + 2] == 0x00 && data[i + 3] > 0 {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// Real-window keyword-tier highlight probe (PAL-03 / Gap 1 / UAT test 5,
+/// 03-10).
+///
+/// Drives the production `on_event_win` frame loop on a real window with a
+/// registry mirroring the production inventory (capture.start FIRST, then the
+/// four builtins with their pinyin keyword aliases). Two Filtering stages type
+/// pinyin queries and assert the rendered keyword tag paints exact #FF6000
+/// (ACCENT) pixels inside row 1's band:
+///
+/// - stage 0: baseline Idle frame (5 rows, the summon height — no resize);
+///   capture the window scale factor.
+/// - stage 1: `set_input("jt")` — "jt" is a subsequence of capture.start's
+///   "jietu" pinyin keyword → filtered == [0] (capture.start first, the UAT 5
+///   "命中排前" half). TWO Redraw frames settle the geometry sync: the first
+///   Filtering frame's 320→128 shrink reallocates the framebuffer (wiping the
+///   just-painted content), so the SECOND frame paints the " · jietu" tag at
+///   the new size. The band scan then asserts ACCENT pixels > 0.
+/// - stage 2: `set_input("tuichu")` — builtin.quit via its pinyin keyword →
+///   filtered == [1]; the same band scan asserts ACCENT pixels again (the
+///   WHOLE keyword tier renders the tag, not just capture.start —
+///   UAT gaps[0].missing[2]).
+/// - stage 3: ESC closes with the paired Destroy + Hidden residue assertions.
+///
+/// Coverage statement (kept honest): the probe locks the render path end to
+/// end (real window + real frame loop + exact ACCENT pixels in the session
+/// framebuffer); the filter-layer keyword index assertions are covered by the
+/// Task-1 unit tests (all five pinyin keywords); the OS-level "the user's eye
+/// sees the orange highlight" truth is re-verified by human UAT test 5.
+fn check_keyword_highlight() -> Result<(), String> {
+    use mybox_core::winit::keyboard::{Key, NamedKey};
+
+    let session = Arc::new(PaletteSession::new());
+    let handle = Arc::new(WindowManagerHandle::new());
+    let ui_proxy = Arc::new(OnceLock::new());
+    // Registry mirroring the production inventory (registration order keeps
+    // capture.start FIRST — the same order as command.rs). All ok_runner: no
+    // runner observability is needed — this probe locks the RENDER path.
+    let registry = registry_with(vec![
+        fake_command(
+            "capture.start",
+            "开始截图",
+            &["截图", "capture", "screen", "jietu"],
+            ok_runner(),
+        ),
+        fake_command(
+            "builtin.quit",
+            "退出应用",
+            &["退出", "quit", "exit", "tuichu"],
+            ok_runner(),
+        ),
+        fake_command(
+            "builtin.open_config",
+            "打开配置目录",
+            &["配置", "config", "peizhi"],
+            ok_runner(),
+        ),
+        fake_command(
+            "builtin.restart",
+            "重启应用",
+            &["重启", "restart", "chongqi"],
+            ok_runner(),
+        ),
+        fake_command(
+            "builtin.open_log",
+            "打开日志文件",
+            &["日志", "log", "rizhi"],
+            ok_runner(),
+        ),
+    ]);
+    summon_palette(&session, &handle, &registry, &ui_proxy).map_err(|e| format!("summon: {e}"))?;
+    let spec = expect_create(&handle)?;
+
+    let s = Arc::clone(&session);
+    let ui_lock = Arc::clone(&ui_proxy);
+    let mut stage = 0u8;
+    let mut scale: f64 = 1.0;
+    let harness = PaletteHarness::new(
+        Arc::clone(&session),
+        Arc::clone(&handle),
+        spec,
+        Box::new(move |h, _el, event| {
+            let WindowEvent::RedrawRequested = event else { return Ok(()); };
+            match stage {
+                0 => {
+                    // Baseline Idle frame (5 rows, 320 logical height — the
+                    // summon size, so no resize/realloc wipe on this frame).
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    if h.non_background_pixels() == 0 {
+                        return Err("Idle frame must render".into());
+                    }
+                    let window = h.window.as_ref().ok_or("window not realized")?;
+                    scale = window.scale_factor();
+                    s.set_input("jt");
+                    stage = 1;
+                    Ok(())
+                }
+                1 => {
+                    // Filtering "jt" → capture.start via the "jietu" pinyin
+                    // keyword (filtered [0]). TWO Redraw frames: the first
+                    // Filtering frame runs the geometry sync (320→128 logical
+                    // height) which reallocates the framebuffer and wipes the
+                    // just-painted content — the second frame paints the
+                    // keyword tag at the new size.
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    if s.state() != PaletteState::Filtering {
+                        return Err(format!(
+                            "set_input must transition to Filtering, got {:?}",
+                            s.state()
+                        ));
+                    }
+                    if s.filtered() != vec![0] {
+                        return Err(format!(
+                            "jt must filter capture.start to position 0, got {:?}",
+                            s.filtered()
+                        ));
+                    }
+                    let accent = accent_pixels_in_row_band(h, scale);
+                    if accent == 0 {
+                        return Err(format!(
+                            "jt must render #FF6000 accent pixels in row 1's band \
+                             (the \" · jietu\" keyword tag) — measured {accent} \
+                             ACCENT px @scale {scale}"
+                        ));
+                    }
+                    eprintln!(
+                        "palette_checks keyword_highlight: jt stage measured \
+                         {accent} ACCENT px in row 1's band"
+                    );
+                    s.set_input("tuichu");
+                    stage = 2;
+                    Ok(())
+                }
+                2 => {
+                    // "tuichu" → builtin.quit via its pinyin keyword (filtered
+                    // [1]) — the WHOLE keyword tier renders the tag, not just
+                    // capture.start. Same height (1 row → 128 logical), so a
+                    // single frame suffices (the second inject guards against
+                    // any stray realloc — harmless repaint).
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    if s.filtered() != vec![1] {
+                        return Err(format!(
+                            "tuichu must filter builtin.quit to position 1, got {:?}",
+                            s.filtered()
+                        ));
+                    }
+                    let accent = accent_pixels_in_row_band(h, scale);
+                    if accent == 0 {
+                        return Err(format!(
+                            "tuichu must render #FF6000 accent pixels in row 1's band \
+                             (the \" · tuichu\" keyword tag) — measured {accent} \
+                             ACCENT px @scale {scale}"
+                        ));
+                    }
+                    eprintln!(
+                        "palette_checks keyword_highlight: tuichu stage measured \
+                         {accent} ACCENT px in row 1's band"
+                    );
+                    press_key(&s, &h.handle, &ui_lock, Key::Named(NamedKey::Escape));
+                    stage = 3;
+                    Ok(())
+                }
+                3 => {
+                    match h.handle.try_recv() {
+                        Some(WindowRequest::Destroy(id)) => {
+                            if Some(id) != h.created_id {
+                                return Err(format!(
+                                    "ESC must destroy the created window ({id} != {:?})",
+                                    h.created_id
+                                ));
+                            }
+                        }
+                        // Drain Redraw stragglers; keep polling.
+                        _ => return Ok(()),
+                    }
+                    if s.state() != PaletteState::Hidden {
+                        return Err("ESC must move the session to Hidden".into());
+                    }
+                    if s.has_live_window() {
+                        return Err("no live window may survive the close".into());
+                    }
+                    h.pass();
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
+        }),
+    );
+    run_harness(harness, &ui_proxy)
+}
+
+// ─── Check 12: click path hides the window before the read-screen (Gap 2 /
+//     UAT test 11, 03-10) ──────────────────────────────────────────────────
+
+/// Real-window click-path hide-before-capture probe (PAL-04/PAL-05 / Gap 2 /
+/// UAT test 11, 03-10).
+///
+/// Drives the full production click chain on a real window with synthetic
+/// pointer events (CursorMoved / MouseInput — winit exposes these for external
+/// construction): egui-winit translation → egui hit-testing →
+/// `Response::clicked()` → `execute::execute` with `hide_before_execute` —
+/// exactly the mouse path that photographed the panel into the screenshot
+/// (UAT 11). capture.start carries a GATED runner (the read-screen side
+/// simulated — the counter only increments after the gate releases):
+///
+/// - stage 0: baseline Idle frame (registers row 1's widget); capture the
+///   window scale; assert the BASELINE window-server visibility
+///   `is_visible() == Some(true)` (a window that starts hidden would make the
+///   stage-3 hide assertion vacuous).
+/// - stage 1: inject `CursorMoved` at row 1's center (logical (300, 92)) and
+///   render the hover frame.
+/// - stage 2: inject `MouseInput` Pressed, render one frame, inject Released.
+/// - stage 3 (the core coverage point): the release frame computes the click →
+///   execute → session.close (Hidden + Destroy enqueued) → the Task-3 Hidden
+///   guard synchronously hides the window (`set_visible(false)` + early
+///   return — no paint, no present, no request_redraw). Assert: session
+///   Hidden; the WINDOW SERVER reports `is_visible() == Some(false)` (macOS
+///   orderOut is immediate — the panel is off-screen before the Destroy
+///   drains or the read-screen runs); the gated runner has NOT started
+///   (counter == 0 — the read-screen never saw the panel); the Destroy for
+///   the created window is already enqueued.
+/// - stage 4: release the gate → the runner completes exactly once → after
+///   the finalize hop settles, NO second Destroy (the hidden panel's
+///   finalize is a generation/state-guarded no-op — capture_hides_first same
+///   assertion).
+///
+/// Coverage statement (kept honest): the probe drives the real window + the
+/// real on_event_win closure; `is_visible() == Some(false)` locks the
+/// window-server view of the hide BEFORE the gated read-screen starts. The
+/// OS compositor-level "the screenshot never contains the panel" truth is
+/// re-verified by human UAT test 11 on the desktop.
+fn check_click_hide_before_capture() -> Result<(), String> {
+    use mybox_core::winit::event::{DeviceId, ElementState, MouseButton};
+
+    let session = Arc::new(PaletteSession::new());
+    let handle = Arc::new(WindowManagerHandle::new());
+    let ui_proxy = Arc::new(OnceLock::new());
+    // capture.start FIRST (row 1 in Idle): hide_before_execute + a GATED
+    // runner — the "window hidden before the read-screen" ordering is
+    // observable deterministically (counter == 0 at the hide, 1 after the
+    // release).
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let registry = registry_with(vec![
+        Command {
+            id: "capture.start",
+            name: "开始截图".to_string(),
+            description: "capture fake".to_string(),
+            keywords: vec!["jietu"],
+            hide_before_execute: true,
+            runner: gated_runner(Arc::clone(&counter), release_rx),
+        },
+        fake_command(
+            "builtin.quit",
+            "退出应用",
+            &["退出", "quit", "exit", "tuichu"],
+            ok_runner(),
+        ),
+        fake_command(
+            "builtin.open_config",
+            "打开配置目录",
+            &["配置", "config", "peizhi"],
+            ok_runner(),
+        ),
+        fake_command(
+            "builtin.restart",
+            "重启应用",
+            &["重启", "restart", "chongqi"],
+            ok_runner(),
+        ),
+        fake_command(
+            "builtin.open_log",
+            "打开日志文件",
+            &["日志", "log", "rizhi"],
+            ok_runner(),
+        ),
+    ]);
+    summon_palette(&session, &handle, &registry, &ui_proxy).map_err(|e| format!("summon: {e}"))?;
+    let spec = expect_create(&handle)?;
+
+    let s = Arc::clone(&session);
+    let mut stage = 0u8;
+    let mut polls = 0u32;
+    let harness = PaletteHarness::new(
+        Arc::clone(&session),
+        Arc::clone(&handle),
+        spec,
+        Box::new(move |h, _el, event| {
+            let WindowEvent::RedrawRequested = event else { return Ok(()); };
+            match stage {
+                0 => {
+                    // Baseline Idle frame renders 5 rows (registers the row
+                    // widgets for the next frame's hit-test).
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    if h.non_background_pixels() == 0 {
+                        return Err("Idle frame must render".into());
+                    }
+                    let window = h.window.as_ref().ok_or("window not realized")?;
+                    let scale = window.scale_factor();
+                    // Baseline visibility: the window must START visible or the
+                    // stage-3 Some(false) assertion is vacuous.
+                    match window.is_visible() {
+                        Some(true) => {}
+                        other => {
+                            return Err(format!(
+                                "baseline: the window must start visible \
+                                 (is_visible() == Some(true)), got {other:?}"
+                            ));
+                        }
+                    }
+                    // Hover row 1's center: logical (300, 92) — row band
+                    // y 68..116 (input box 12..60 + 8px gap, 48px rows).
+                    h.inject(WindowEvent::CursorMoved {
+                        device_id: DeviceId::dummy(),
+                        position: mybox_core::winit::dpi::PhysicalPosition::new(
+                            300.0 * scale,
+                            92.0 * scale,
+                        ),
+                    })?;
+                    stage = 1;
+                    Ok(())
+                }
+                1 => {
+                    // Hover frame: egui hit-tests the PREVIOUS frame's widgets
+                    // (row 1 registered in stage 0) — the hover state sticks.
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    h.inject(WindowEvent::MouseInput {
+                        device_id: DeviceId::dummy(),
+                        state: ElementState::Pressed,
+                        button: MouseButton::Left,
+                    })?;
+                    stage = 2;
+                    Ok(())
+                }
+                2 => {
+                    // One frame while the button is down, then release.
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    h.inject(WindowEvent::MouseInput {
+                        device_id: DeviceId::dummy(),
+                        state: ElementState::Released,
+                        button: MouseButton::Left,
+                    })?;
+                    stage = 3;
+                    Ok(())
+                }
+                3 => {
+                    // The release frame computes the click → execute →
+                    // hide_before_execute → session.close (Hidden + Destroy
+                    // enqueued) → the Task-3 Hidden guard synchronously hides
+                    // the window (set_visible(false) + early return — no paint,
+                    // no present, no request_redraw). The capture chain's
+                    // screen read must happen AFTER this frame: the window
+                    // server already reports it hidden.
+                    h.inject(WindowEvent::RedrawRequested)?;
+                    if s.state() != PaletteState::Hidden {
+                        return Err(format!(
+                            "the click must close the panel (Hidden), got {:?}",
+                            s.state()
+                        ));
+                    }
+                    // Honest calibration: `is_visible() == Some(false)` on
+                    // macOS (orderOut is immediate); a None/Some(true) result
+                    // fails with the actual value printed.
+                    let vis = h.window.as_ref().ok_or("window not realized")?.is_visible();
+                    match vis {
+                        Some(false) => {}
+                        other => {
+                            return Err(format!(
+                                "window server must report the window hidden \
+                                 (is_visible() == Some(false)) before the read-screen \
+                                 runner starts — got {other:?} (honest calibration)"
+                            ));
+                        }
+                    }
+                    if counter.load(Ordering::SeqCst) != 0 {
+                        return Err(
+                            "the gated read-screen runner must not have started \
+                             before the window hide"
+                                .into(),
+                        );
+                    }
+                    match h.handle.try_recv() {
+                        Some(WindowRequest::Destroy(id)) => {
+                            if Some(id) != h.created_id {
+                                return Err(format!(
+                                    "the click must destroy the created window \
+                                     ({id} != {:?})",
+                                    h.created_id
+                                ));
+                            }
+                        }
+                        // Drain Redraw stragglers; keep polling.
+                        _ => return Ok(()),
+                    }
+                    let _ = release_tx.send(());
+                    stage = 4;
+                    polls = 0;
+                    Ok(())
+                }
+                4 => {
+                    // Released in stage 3: the gated runner completes on its
+                    // worker thread and the finalize hop (UiThreadProxy →
+                    // AppEvent::Ui) lands on the main thread. Poll the
+                    // counter, let the hop settle, then assert no second
+                    // Destroy (the hidden panel's finalize is a
+                    // generation/state-guarded no-op — capture_hides_first
+                    // same assertion).
+                    if counter.load(Ordering::SeqCst) != 1 {
+                        polls += 1;
+                        if polls > 20 {
+                            return Err("the gated runner must complete after release".into());
+                        }
+                        return Ok(());
+                    }
+                    polls += 1;
+                    if polls < 4 {
+                        return Ok(()); // let the finalize hop settle
+                    }
+                    if let Some(req) = h.handle.try_recv() {
+                        return Err(format!(
+                            "no second Destroy expected after a hidden-panel completion, \
+                             got {}",
+                            request_name(Some(&req))
+                        ));
+                    }
+                    h.pass();
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
+        }),
+    );
+    run_harness(harness, &ui_proxy)
+}
+
 // ─── Entry point (exit 0 ok / 1 fail / 2 usage — 02-04 discipline) ──────────
 
 fn main() {
@@ -2053,9 +2515,11 @@ fn main() {
         "hover_click_alignment" => check_hover_click_alignment(),
         "ctrl_pn_navigation" => check_ctrl_pn_navigation(),
         "ime_commit_updates_input" => check_ime_commit_updates_input(),
+        "keyword_highlight" => check_keyword_highlight(),
+        "click_hide_before_capture" => check_click_hide_before_capture(),
         _ => {
             eprintln!(
-                "usage: palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close|glyph_shape|position_stable_on_filter|hover_click_alignment|ctrl_pn_navigation|ime_commit_updates_input>"
+                "usage: palette_checks <summon_render|fuzzy_navigation_execute|capture_hides_first|five_summon_esc_no_residue|consecutive_summon_close|glyph_shape|position_stable_on_filter|hover_click_alignment|ctrl_pn_navigation|ime_commit_updates_input|keyword_highlight|click_hide_before_capture>"
             );
             std::process::exit(2);
         }

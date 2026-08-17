@@ -162,3 +162,34 @@ fn palette_ctrl_pn_navigation() {
 fn palette_ime_commit_updates_input() {
     run_check("ime_commit_updates_input");
 }
+
+/// Test 11 — Gap 1 / UAT test 5 regression (03-10, PAL-03): on a real window,
+/// the production frame loop renders the keyword-tier highlight end to end —
+/// "jt" filters capture.start first via the "jietu" pinyin keyword and the
+/// " · jietu" tag's matched glyphs paint exact #FF6000 (ACCENT) pixels inside
+/// row 1's band; "tuichu" repeats the assertion for builtin.quit (the WHOLE
+/// keyword tier renders the tag, not just capture.start — the filter-layer
+/// index assertions for all five pinyin keywords live in the Task-1 unit
+/// tests). ESC closes with a paired Destroy. The OS-level "the user's eye
+/// sees the orange highlight" truth is re-verified by human UAT test 5 on the
+/// desktop.
+#[test]
+#[ignore]
+fn palette_keyword_highlight() {
+    run_check("keyword_highlight");
+}
+
+/// Test 12 — Gap 2 / UAT test 11 regression (03-10, PAL-04/PAL-05): on a real
+/// window, synthetic CursorMoved + MouseInput events click capture.start
+/// (hide_before_execute + a gated read-screen runner). The click frame must
+/// close the panel (Hidden) AND synchronously hide the window at the window
+/// server (`is_visible() == Some(false)`) BEFORE the gated runner starts
+/// (counter == 0 — the read-screen never saw the panel), with the Destroy
+/// already enqueued; releasing the gate runs the runner exactly once with NO
+/// second Destroy — the Enter/click timing convergence (the panel is
+/// off-screen before any screenshot read, UAT 11's direct regression).
+#[test]
+#[ignore]
+fn palette_click_hide_before_capture() {
+    run_check("click_hide_before_capture");
+}
