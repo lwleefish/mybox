@@ -348,6 +348,7 @@ fn draw_command_list(
                         selection == Some(pos),
                         hl.map(|m| m.name_indices.as_slice()).unwrap_or(&[]),
                         hl.map(|m| m.description_indices.as_slice()).unwrap_or(&[]),
+                        hl.and_then(|m| m.keyword_hit.as_ref()),
                         session,
                         windows,
                         ui_proxy,
@@ -382,6 +383,7 @@ fn draw_command_row(
     selected: bool,
     name_hl: &[usize],
     description_hl: &[usize],
+    keyword_hit: Option<&filter::KeywordHit>,
     session: &Arc<PaletteSession>,
     windows: &Arc<WindowManagerHandle>,
     ui_proxy: &Arc<OnceLock<UiThreadProxy>>,
@@ -424,7 +426,21 @@ fn draw_command_row(
     let name_job = highlight_job(&cmd.name, name_hl, FONT_SIZE_NAME, TEXT);
     let name_galley = painter.layout_job(name_job);
     painter.galley(name_pos, name_galley, TEXT);
-    let desc_job = highlight_job(&cmd.description, description_hl, FONT_SIZE_DESC, TEXT_DIM);
+    // Gap 1 (UAT test 5) render layer: a keyword-tier hit appends the
+    // ` · {keyword}` tag to the END of the description line — same line, no
+    // new row (row_geometry_fits_48px invariant). The tag sections slice
+    // `tag` by their byte ranges and merge into ONE desc galley.
+    let mut desc_job = highlight_job(&cmd.description, description_hl, FONT_SIZE_DESC, TEXT_DIM);
+    if let Some(kh) = keyword_hit {
+        let (tag, tag_job) = keyword_tag_job(kh.keyword, &kh.indices, FONT_SIZE_DESC);
+        for section in &tag_job.sections {
+            desc_job.append(
+                &tag[section.byte_range.clone()],
+                0.0,
+                section.format.clone(),
+            );
+        }
+    }
     let desc_galley = painter.layout_job(desc_job);
     painter.galley(desc_pos, desc_galley, TEXT_DIM);
     resp
@@ -452,6 +468,40 @@ fn highlight_job(text: &str, indices: &[usize], size: f32, base: egui::Color32) 
         job.append(&text[cursor..], 0.0, fmt(base));
     }
     job
+}
+
+/// Build the keyword-tag LayoutJob: `" · {keyword}"` rendered at the end of
+/// the description line (Gap 1 / UAT test 5 — Route A inline rendering).
+/// The ` · ` separator is TEXT_DIM; the keyword's query-hit chars (per
+/// `fuzzy_indices`) are ACCENT and the rest TEXT_DIM — color ONLY, never size
+/// or weight (UI-SPEC L63 invariant). Returns the tag STRING alongside the
+/// job because `LayoutJob.text` is a pub field whose `sections` byte ranges
+/// index into it — the caller slices `tag` per section and appends each into
+/// the description job (one merged galley, same line, no new row).
+fn keyword_tag_job(keyword: &str, indices: &[usize], size: f32) -> (String, egui::text::LayoutJob) {
+    let tag = format!(" · {keyword}");
+    let fmt = |color: egui::Color32| egui::TextFormat {
+        color,
+        font_id: egui::FontId::new(size, egui::FontFamily::Proportional),
+        ..Default::default()
+    };
+    let mut job = egui::text::LayoutJob::default();
+    // " · " is bytes 0..3 of `tag`; the keyword starts at byte 3.
+    job.append(&tag[0..3], 0.0, fmt(TEXT_DIM));
+    let mut cursor = 3;
+    for (start, end) in char_indices_to_byte_ranges(keyword, indices) {
+        let start = start + 3;
+        let end = end + 3;
+        if start > cursor {
+            job.append(&tag[cursor..start], 0.0, fmt(TEXT_DIM));
+        }
+        job.append(&tag[start..end], 0.0, fmt(ACCENT));
+        cursor = end;
+    }
+    if cursor < tag.len() {
+        job.append(&tag[cursor..], 0.0, fmt(TEXT_DIM));
+    }
+    (tag, job)
 }
 
 /// Convert fuzzy char positions to UTF-8 byte ranges (empty/out-of-range
@@ -609,6 +659,38 @@ mod tests {
     }
 
     #[test]
+    fn keyword_tag_job_marks_matched_chars_accent() {
+        // Gap 1 (UAT test 5): the keyword tag " · jietu" marks the query-hit
+        // chars ACCENT (#FF6000) and everything else TEXT_DIM — color only,
+        // the UI-SPEC L63 invariant. "jt" hits j at char 0 and t at char 3 of
+        // "jietu" → tag byte offsets 3 and 6 (the " · " separator is 0..3).
+        let (tag, job) = keyword_tag_job("jietu", &[0, 3], FONT_SIZE_DESC);
+        assert_eq!(tag, " · jietu", "tag = separator + keyword");
+        let sections: Vec<(usize, egui::Color32)> = job
+            .sections
+            .iter()
+            .map(|s| (s.byte_range.start, s.format.color))
+            .collect();
+        assert_eq!(sections[0], (0, TEXT_DIM), "the ' · ' separator is TEXT_DIM");
+        assert_eq!(sections[1], (3, ACCENT), "j (char 0 of jietu) is ACCENT");
+        assert_eq!(sections[2], (4, TEXT_DIM), "the 'ie' between hits is TEXT_DIM");
+        assert_eq!(sections[3], (6, ACCENT), "t (char 3 of jietu) is ACCENT");
+        assert_eq!(sections[4], (7, TEXT_DIM), "the trailing 'u' is TEXT_DIM");
+        // Empty indices → no ACCENT anywhere: the separator + keyword runs are
+        // all TEXT_DIM (Gap 1 plan: "全 TEXT_DIM 无 ACCENT").
+        let (plain_tag, plain) = keyword_tag_job("jietu", &[], FONT_SIZE_DESC);
+        assert_eq!(plain_tag, " · jietu");
+        assert!(
+            plain.sections.iter().all(|s| s.format.color == TEXT_DIM),
+            "no hits → every section TEXT_DIM"
+        );
+        assert!(
+            plain.sections.iter().all(|s| s.format.color != ACCENT),
+            "no ACCENT without indices"
+        );
+    }
+
+    #[test]
     fn row_geometry_fits_48px() {
         // GAP-4 arithmetic lock: name top (SP_SM=8) + name line height
         // (14·1.3=18.2) + gap (SP_XS=4) + description line height (12·1.3=15.6)
@@ -685,6 +767,7 @@ mod tests {
                         false,
                         &[],
                         &[],
+                        None, // keyword_hit — this test command has no keywords
                         &session,
                         &windows,
                         &proxy,

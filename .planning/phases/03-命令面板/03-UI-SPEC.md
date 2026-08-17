@@ -72,7 +72,7 @@ Exceptions: `md = 12px` is a deliberate half-step between 8px and 16px — used 
 | Dominant (60%) | `#202020` | Panel background (the card), list area background |
 | Secondary (30%) | `#404040` | Selected row background, scrollbar thumb |
 | Secondary (elevated) | `#2E2E2E` | Input box background, hovered row background |
-| Accent (10%) | `#FF6000` | Matched-keyword character highlight ONLY |
+| Accent (10%) | `#FF6000` | Matched-keyword character highlight ONLY (name / description / the rendered keyword tag) |
 | Destructive / Error | `#E5484D` | Error-state message text only — no destructive user actions this phase |
 
 Text tokens:
@@ -85,7 +85,7 @@ Text tokens:
 | `hairline` | `rgba(255,255,255,0.08)` | 1px card border (defines the card edge over arbitrary screen content) |
 | `disabled` | 50% opacity | Whole list + input while executing (D-04) — applied as alpha, not a color swap |
 
-**Accent reserved for:** matched-keyword character highlight in command name and description text. **Nothing else.** Selected row uses `#404040` (secondary), never accent — this keeps the orange keyword highlight legible inside the selected row.
+**Accent reserved for:** matched-keyword character highlight in command name, description text, and the rendered keyword tag. **Nothing else.** Selected row uses `#404040` (secondary), never accent — this keeps the orange keyword highlight legible inside the selected row.
 
 **Phase 2 consistency trace (D-09):** `#202020` = Phase 2 capture_checks dark fill; `#404040` = Phase 2 toolbar button surface; `#FFFFFF` = Phase 2 text/icon color; `#FF6000` = Phase 2 annotation/active-tool accent. All four are carried forward verbatim so the palette reads as the same product.
 
@@ -118,7 +118,7 @@ The executor implements exactly these six pieces; no other UI elements exist thi
 |-----------|--------------|------|
 | `PaletteCard` | custom-painted root (egui `Frame::none()` + rounded-rect painter) | fill `#202020`, radius 12, hairline border, width 600, adaptive height per geometry table |
 | `SearchInput` | `TextEdit::singleline` | height 48, bg `#2E2E2E` radius 8, 12px horizontal padding, text 16px/400 `#FFFFFF`, placeholder `输入命令…` in `#6E6E6E`, caret `#FFFFFF` |
-| `CommandRow` | custom-painted row + `LayoutJob` for highlight | height 48, 12px horizontal padding, name 14px/600 `#FFFFFF` top, description 12px/400 `#A8A8A8` bottom, 4px name→description gap; selected = bg `#404040` radius 8; hovered = bg `#2E2E2E` radius 8; keyword highlight `#FF6000` via `TextFormat` in `LayoutJob` |
+| `CommandRow` | custom-painted row + `LayoutJob` for highlight | height 48, 12px horizontal padding, name 14px/600 `#FFFFFF` top, description 12px/400 `#A8A8A8` bottom, 4px name→description gap; selected = bg `#404040` radius 8; hovered = bg `#2E2E2E` radius 8; keyword highlight `#FF6000` via `TextFormat` in `LayoutJob`. Keyword-tier hit (pinyin etc., 03-10): append a ` · {keyword}` tag at the END of the description line — same 12px/400, hit chars `#FF6000` (UAT test 5 highlight target); the tag stays on the same line and never adds a row |
 | `StatusLine` | `Label` | 24px tall, text 12px/400 `#A8A8A8`, copy `正在执行：{name}…`, 4px gaps above/below, shown only in Executing state |
 | `EmptyState` | centered `Label` block | 64px block: heading 14px/600 `#FFFFFF` + body 12px/400 `#A8A8A8` (copy below) |
 | `ErrorState` | centered `Label` block | 64px block: line1 14px/600 `#E5484D` + line2 12px/400 `#A8A8A8` + line3 12px/400 `#6E6E6E` (copy below) |
