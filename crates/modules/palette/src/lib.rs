@@ -295,6 +295,22 @@ pub fn build_window_spec(
             // windows/ui_proxy into the command rows, where a row click routes
             // through execute::execute with the same semantics as Enter.
             let full_output = egui_ctx.run(raw, |ctx| ui::draw(ctx, &session, &windows, &ui_proxy));
+
+            // Gap 2 (03-10, UAT test 11): 鼠标点击路径的 execute()（含 hide_before_execute
+            // 的 Destroy 入队）发生在本帧 egui_ctx.run 闭包内（ui.rs draw_command_row
+            // resp.clicked() → execute → session.close() → Hidden）。Destroy 只在
+            // about_to_wait 排出（本帧剩余 paint+present 阻塞主线程 2-10ms+），与
+            // capture 链屏幕读取（3-20ms）竞态重叠——面板仍可见时被拍进截图。此处
+            // 同步隐藏窗口（macOS orderOut 即刻生效，winit 0.30.13 window_delegate
+            // is_visible 确定性 Some）并跳过本帧剩余全部工作——不 paint、不 present、
+            // 不 request_redraw（下方几何同步块内的 request_redraw 同样被跳过）。Enter
+            // 路径 on_palette_key 返回 true 时上方已早退、不跑帧循环；此处 Hidden 态只
+            // 可能来自帧内执行（点击路径）或关闭后残留帧——两者都该立即隐藏。
+            if session.state() == PaletteState::Hidden {
+                window.set_visible(false);
+                return;
+            }
+
             session.apply_textures(full_output.textures_delta);
             let primitives = egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
             // Snapshot the texture table FIRST: `with_framebuffer` holds the
