@@ -5,7 +5,10 @@
 //! the top-level `fuzzy_match`/`fuzzy_indices` fns are deprecated since
 //! 0.3.5). Ranking is three-tier: name matches beat description matches beat
 //! keyword matches; within a tier, higher skim score first; ties keep
-//! registration order (UI-SPEC lifecycle rule 4 — deterministic).
+//! registration order (UI-SPEC lifecycle rule 4 — deterministic). Keyword-tier
+//! hits additionally carry `Match.keyword_hit` — the matched keyword string and
+//! its char-position indices — so the UI can render the keyword tag with the
+//! query hits highlighted (Gap 1 / UAT test 5).
 
 use mybox_core::command::Command;
 use mybox_core::fuzzy_matcher::skim::SkimMatcherV2;
@@ -24,7 +27,9 @@ pub const KEYWORD_TIER_OFFSET: i64 = 200_000;
 /// One ranked match: the command index into the snapshotted list, its score,
 /// and the **char-position** highlight indices for name and description
 /// (`fuzzy_indices` returns char positions — the UI layer converts them to
-/// byte ranges for the `LayoutJob`).
+/// byte ranges for the `LayoutJob`). Keyword-tier hits also carry
+/// `keyword_hit` — the matched keyword string + its char indices — the data
+/// channel for the UI keyword-tag highlight (Gap 1 / UAT test 5).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Match {
     pub cmd_index: usize,
@@ -34,6 +39,20 @@ pub struct Match {
     pub name_indices: Vec<usize>,
     /// Char positions of the query hits in `Command::description` (empty = none).
     pub description_indices: Vec<usize>,
+    /// Keyword-tier hit data (matched keyword + char indices); `None` for
+    /// name/description-tier matches and the empty-query Idle list.
+    pub keyword_hit: Option<KeywordHit>,
+}
+
+/// A keyword-tier hit: the matched `Command::keywords` entry and the **char**
+/// positions of the query hits inside it (same semantics as `name_indices` —
+/// the UI converts them to byte ranges). The derives mirror `Match`: Rust does
+/// NOT propagate derives to nested types, so `KeywordHit` must implement
+/// `PartialEq`/`Eq` itself for the `keyword_hit == Some(..)` comparisons.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeywordHit {
+    pub keyword: &'static str,
+    pub indices: Vec<usize>,
 }
 
 /// The tier a match belongs to, derived from its index fields (a name hit may
@@ -67,6 +86,7 @@ pub fn filter_commands(cmds: &[Command], query: &str) -> Vec<Match> {
                 score: 0,
                 name_indices: Vec::new(),
                 description_indices: Vec::new(),
+                keyword_hit: None,
             })
             .collect();
     }
@@ -80,32 +100,53 @@ pub fn filter_commands(cmds: &[Command], query: &str) -> Vec<Match> {
         // The tier is decided by priority order; indices for both fields are
         // computed independently so a name-tier match still highlights query
         // hits inside the description (D-10).
-        let (score, name_indices, description_indices) = if let Some((s, inds)) = name_hit {
-            (
-                s,
-                inds,
-                description_hit
-                    .map(|(_, inds)| inds)
-                    .unwrap_or_default(),
-            )
-        } else if let Some((s, inds)) = description_hit {
-            (s - DESCRIPTION_TIER_OFFSET, Vec::new(), inds)
-        } else {
-            match cmd
-                .keywords
-                .iter()
-                .filter_map(|kw| matcher.fuzzy_match(kw, &query))
-                .max()
-            {
-                Some(s) => (s - KEYWORD_TIER_OFFSET, Vec::new(), Vec::new()),
-                None => continue, // no hit anywhere — excluded
-            }
-        };
+        let (score, name_indices, description_indices, keyword_hit) =
+            if let Some((s, inds)) = name_hit {
+                (
+                    s,
+                    inds,
+                    description_hit
+                        .map(|(_, inds)| inds)
+                        .unwrap_or_default(),
+                    None,
+                )
+            } else if let Some((s, inds)) = description_hit {
+                (s - DESCRIPTION_TIER_OFFSET, Vec::new(), inds, None)
+            } else {
+                // Keyword tier (Gap 1 / UAT test 5): score EVERY keyword with
+                // `fuzzy_indices` (the old score-only path returned no
+                // highlight indices — they never reached the Match). Keep the
+                // best (highest) score; ties keep the earlier keyword — the
+                // same semantics as the previous `.max()`, registration-order
+                // deterministic. Commands with no keyword hit are excluded.
+                let mut best: Option<(i64, &'static str, Vec<usize>)> = None;
+                for kw in cmd.keywords.iter().copied() {
+                    if let Some((s, inds)) = matcher.fuzzy_indices(kw, &query) {
+                        let better = match &best {
+                            Some((bs, _, _)) => s > *bs,
+                            None => true,
+                        };
+                        if better {
+                            best = Some((s, kw, inds));
+                        }
+                    }
+                }
+                match best {
+                    Some((s, keyword, indices)) => (
+                        s - KEYWORD_TIER_OFFSET,
+                        Vec::new(),
+                        Vec::new(),
+                        Some(KeywordHit { keyword, indices }),
+                    ),
+                    None => continue, // no hit anywhere — excluded
+                }
+            };
         matches.push(Match {
             cmd_index,
             score,
             name_indices,
             description_indices,
+            keyword_hit,
         });
     }
 
@@ -135,7 +176,10 @@ mod tests {
     }
 
     /// The Phase 3 command inventory (UI-SPEC): capture.start with the pinyin
-    /// keyword "jietu" (Pitfall 6 data fix) + four builtins.
+    /// keyword "jietu" (Pitfall 6 data fix) + four builtins. The builtins carry
+    /// their production pinyin aliases (03-10: tuichu/peizhi/chongqi/rizhi,
+    /// aligned with command.rs L111/134/150/179) so the keyword-tier highlight
+    /// tests can hit the WHOLE keyword tier, not just capture.start.
     fn inventory() -> Vec<Command> {
         vec![
             cmd(
@@ -144,19 +188,29 @@ mod tests {
                 "截取屏幕区域并复制/保存",
                 &["截图", "capture", "screen", "jietu"],
             ),
-            cmd("builtin.quit", "退出应用", "退出 mybox 应用", &["退出", "quit", "exit"]),
+            cmd(
+                "builtin.quit",
+                "退出应用",
+                "退出 mybox 应用",
+                &["退出", "quit", "exit", "tuichu"],
+            ),
             cmd(
                 "builtin.open_config",
                 "打开配置目录",
                 "在文件管理器中打开 mybox 配置目录",
-                &["配置", "config"],
+                &["配置", "config", "peizhi"],
             ),
-            cmd("builtin.restart", "重启应用", "重启 mybox 应用", &["重启", "restart"]),
+            cmd(
+                "builtin.restart",
+                "重启应用",
+                "重启 mybox 应用",
+                &["重启", "restart", "chongqi"],
+            ),
             cmd(
                 "builtin.open_log",
                 "打开日志文件",
                 "打开 mybox 运行日志",
-                &["日志", "log"],
+                &["日志", "log", "rizhi"],
             ),
         ]
     }
@@ -168,6 +222,74 @@ mod tests {
         let matches = filter_commands(&inventory(), "jt");
         assert!(!matches.is_empty(), "jt must hit via the jietu keyword");
         assert_eq!(matches[0].cmd_index, 0, "jt must rank capture.start first");
+        // Gap 1 (UAT test 5) data path: the keyword-tier hit carries the
+        // matched keyword + char indices — "jt" hits j at char 0 and t at
+        // char 3 of "jietu", which is what the UI highlights.
+        assert_eq!(
+            matches[0].keyword_hit,
+            Some(KeywordHit {
+                keyword: "jietu",
+                indices: vec![0, 3],
+            }),
+            "jt must carry the jietu keyword hit with char indices [0, 3]"
+        );
+    }
+
+    #[test]
+    fn pinyin_keywords_all_carry_keyword_hit() {
+        // Gap 1 / UAT gaps[0].missing[2]: the keyword-tier highlight covers
+        // the WHOLE pinyin keyword set, not just capture.start. Each pinyin
+        // query hits exactly its own command via its keyword alias, and the
+        // hit carries non-empty indices + the matched keyword string.
+        let cases: [(&str, usize); 4] = [
+            ("tuichu", 1), // builtin.quit
+            ("peizhi", 2), // builtin.open_config
+            ("chongqi", 3), // builtin.restart
+            ("rizhi", 4),  // builtin.open_log
+        ];
+        for (query, expected_idx) in cases {
+            let matches = filter_commands(&inventory(), query);
+            assert!(!matches.is_empty(), "{query} must hit");
+            assert_eq!(
+                matches[0].cmd_index, expected_idx,
+                "{query} must rank its own command first"
+            );
+            let hit = matches[0].keyword_hit.as_ref().unwrap_or_else(|| {
+                panic!("{query} must carry a keyword_hit");
+            });
+            assert_eq!(
+                hit.keyword, query,
+                "{query}: the hit keyword must equal the query string"
+            );
+            assert!(
+                !hit.indices.is_empty(),
+                "{query}: the hit keyword must carry non-empty highlight indices"
+            );
+        }
+    }
+
+    #[test]
+    fn name_tier_match_has_no_keyword_hit() {
+        // A name-tier match (截图 in 开始截图) carries no keyword hit — the
+        // keyword tag only renders for keyword-tier hits.
+        let matches = filter_commands(&inventory(), "截图");
+        assert!(!matches.is_empty(), "截图 must match");
+        assert_eq!(matches[0].cmd_index, 0);
+        assert!(
+            matches[0].keyword_hit.is_none(),
+            "name-tier matches must not carry a keyword hit"
+        );
+    }
+
+    #[test]
+    fn empty_query_has_no_keyword_hit() {
+        // Idle semantics: every command in registration order, no highlights.
+        let matches = filter_commands(&inventory(), "   ");
+        assert_eq!(matches.len(), 5);
+        assert!(
+            matches.iter().all(|m| m.keyword_hit.is_none()),
+            "empty query must not produce keyword hits"
+        );
     }
 
     #[test]
