@@ -127,6 +127,13 @@ impl PaletteSession {
     /// bump the generation counter, move to Idle. Returns the new generation.
     /// Also bumps the geometry revision (a fresh window gets fresh geometry —
     /// the frame loop must re-sync the height for the new command count).
+    /// GAP-8 (03-09): also resets `ime_allowed=false` and `winit_state=None`
+    /// so every fresh window re-runs `ensure_winit_state` — the explicit
+    /// `window.set_ime_allowed(true)` hits the new winit Window and a fresh
+    /// egui-winit State is built for it. egui-winit 0.30's `set_ime_allowed`
+    /// debounce (vendored lib.rs:848-852) only fires on an `allow_ime` FLIP,
+    /// so reusing the prior State (`allow_ime` stays true) never re-opens IME
+    /// on the new window — winit macOS defaults to IME disabled per window.
     pub fn summon(&self, commands: Vec<Command>) -> u64 {
         let mut inner = self.state.lock().unwrap();
         inner.generation += 1;
@@ -135,6 +142,14 @@ impl PaletteSession {
         // Ctrl from a previous window must never make the new panel swallow
         // plain P/N input.
         inner.modifiers = winit::keyboard::ModifiersState::empty();
+        // GAP-8 reset (03-09, REVIEW WR-01 fix): forces `ensure_winit_state`
+        // to re-enter the `if !inner.ime_allowed` guard on the next event for
+        // the new window → re-issue `window.set_ime_allowed(true)` on the new
+        // winit Window and build a fresh egui-winit State for it. Without
+        // these resets the second and later summon windows never re-receive
+        // `set_ime_allowed(true)` (the debounce sees no `allow_ime` flip).
+        inner.ime_allowed = false;
+        inner.winit_state = None;
         inner.state = PaletteState::Idle;
         inner.input.clear();
         inner.selection = None;
