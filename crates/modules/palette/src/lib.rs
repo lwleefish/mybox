@@ -173,7 +173,12 @@ pub fn summon_palette(
 ) -> anyhow::Result<()> {
     let all = commands.all();
     // UI-SPEC geometry table: height adapts to the visible row count.
-    let height = ui::window_height(PaletteState::Idle, all.len());
+    // WR-02 (03-09): `all.len().max(1)` unifies with the frame-loop rule in
+    // `sync_window_geometry` (which uses `session.filtered().len().max(1)`)
+    // — the zero-command case is unreachable in production (≥4 builtins
+    // always exist) but the two call sites now agree on 80 instead of
+    // diverging into 80 vs 128.
+    let height = ui::window_height(PaletteState::Idle, all.len().max(1));
     let geometry = position::summon_geometry((ui::PANEL_WIDTH, height))?;
     session.summon(all);
     session.install_framebuffer(geometry.inner_size.0, geometry.inner_size.1);
@@ -483,11 +488,26 @@ pub fn on_palette_key(
 /// a filter shrink then pushed the top edge DOWN (re-centering moved the
 /// smaller window lower), which is the observed "panel falls" drift. The
 /// `last_height` gate ensures the same physical height is requested only once.
+///
+/// WR-04 (03-09): a Hidden-state window early-returns at the top of this
+/// function. The capture.start click-execute path bumps `geometry_revision`
+/// on the same frame and the window is about to be Destroyed — feeding
+/// `window_height(Hidden, ..)` (which is `0` → `max(1)` `1`) into
+/// `request_inner_size` and `resize_framebuffer` does a 1px size request +
+/// 1px framebuffer reallocation per screenshot. The early return is placed
+/// BEFORE the `last_height` lock so the gate is NOT poisoned with a 1px
+/// value — the next summon's first Idle sync is not short-circuited by a
+/// stale `*last == physical_h` 1px match. After Task 1's summon reset, the
+/// next `summon_palette` calls `install_framebuffer` on a fresh buffer
+/// anyway — Hidden leaving `last_height` untouched keeps the gate aligned
+/// with the framebuffer lifecycle.
 fn sync_window_geometry(
     window: &winit::window::Window,
     session: &PaletteSession,
     last_height: &std::sync::Mutex<u32>,
 ) {
+    // WR-04 (03-09): Hidden early-return — see the doc comment above.
+    if session.state() == PaletteState::Hidden { return; }
     let logical_h = ui::window_height(session.state(), session.filtered().len().max(1));
     let scale = window.scale_factor();
     let physical_h = (logical_h as f64 * scale).round() as u32;
