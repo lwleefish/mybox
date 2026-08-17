@@ -154,12 +154,12 @@ Plans:
   3. 命令面板在 Windows 上可唤出并执行命令
   4. 高 DPI 显示器上截图选区与实际捕获区域一致
 
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
 
-- [ ] 04-01: Windows 平台适配与测试
-- [ ] 04-02: DPI 缩放修复 + 错误处理打磨
+- [ ] 04-01: Windows 平台适配与测试 — GitHub Actions Windows CI（编译/单测/16 headless 探针）+ Windows CJK 字体 + enter_clipboard 能力门控 + 建仓推送
+- [ ] 04-02: DPI 缩放修复 + 错误处理打磨 — point_to_physical 纯函数 + 多 scale 单测 + compute_geometry @1.5 + Phase 3 遗留 9 项错误债全修（WR-01..03 + IN-01..06）
 
 ## Progress
 
