@@ -137,15 +137,26 @@ fn palette_ctrl_pn_navigation() {
     run_check("ctrl_pn_navigation");
 }
 
-/// Test 10 — GAP-7 regression (03-08, PAL-03): on a real window, synthetic
-/// `Ime::Preedit`/`Ime::Commit` events drive the full egui-winit → egui
-/// `Event::Ime` → TextEdit → `session.set_input` chain. The first window event
-/// must set the explicit IME-enable flag (`ime_allowed` — GAP-7's code-level
-/// fix); the committed Chinese text "截图" must reach `session.input`, move the
-/// state to Filtering and filter to [0] (capture.start); `set_input("tuichu")`
-/// must hit builtin.quit via the new pinyin keyword alias (the no-IME
-/// prefix-discovery path → filtered [1]); ESC closes with a paired Destroy.
-/// The OS candidate-window appearance is re-verified by human UAT test 10.
+/// Test 10 — GAP-7 + GAP-8 regression (03-08/03-09, PAL-01/PAL-03): on a real
+/// window, synthetic `Ime::Preedit`/`Ime::Commit` events drive the full
+/// egui-winit → egui `Event::Ime` → TextEdit → `session.set_input` chain.
+/// The first window event must set the explicit IME-enable flag
+/// (`ime_allowed` — GAP-7's code-level fix); the committed Chinese text
+/// "截图" must reach `session.input`, move the state to Filtering and filter
+/// to [0] (capture.start); `set_input("tuichu")` must hit builtin.quit via
+/// the new pinyin keyword alias (the no-IME prefix-discovery path → filtered
+/// [1]); ESC closes with a paired Destroy. **Re-summon extension (03-09,
+/// GAP-8 / REVIEW WR-01):** ESC close then `summon_palette` re-summons a
+/// SECOND window; the probe asserts `ime_allowed` was reset to false before
+/// the second window's first event (summon reset evidence) AND re-set to
+/// true after the first event is processed through the real production
+/// closure (REVIEW WR-01's exact defect path that 03-08's probe missed) —
+/// the GAP-8 coverage-hole fix. A second Chinese IME flow — Preedit
+/// "重新截图" (the composition candidate buffer the OS input method displays)
+/// + Commit "截图" (matching `开始截图`'s name tier) — verifies zero-regression
+/// on the second window's freshly-built egui-winit State; ESC closes the
+/// second window with a paired Destroy. The OS candidate-window appearance
+/// (first AND re-summon scenarios) is re-verified by human UAT test 10.
 #[test]
 #[ignore]
 fn palette_ime_commit_updates_input() {

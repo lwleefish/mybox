@@ -1743,13 +1743,43 @@ fn check_ctrl_pn_navigation() -> Result<(), String> {
 ///   [0] (capture.start's name tier). Then `set_input("tuichu")` asserts the
 ///   GAP-7 no-IME prefix-discovery path at the session level (the pinyin
 ///   keyword alias hits builtin.quit → filtered [1]). ESC closes.
-/// - stage 3: poll for the paired Destroy + Hidden residue assertions.
+/// - stage 3: poll for the paired Destroy + Hidden residue assertions, then
+///   re-summon through the production `summon_palette` path — preparation
+///   for the GAP-8 re-summon coverage below.
+/// - stage 4 (GAP-8, 03-09): reset + re-set evidence — assert
+///   `s.ime_allowed() == false` right before the second window's first
+///   event (the summon() reset evidence), then `h.inject(RedrawRequested)`
+///   to run the second window's first event through the real production
+///   closure (which re-enters `ensure_winit_state`, rebuilds the
+///   egui-winit State for the new winit Window, and re-issues
+///   `window.set_ime_allowed(true)`), and assert
+///   `s.ime_allowed() == true` (re-set path evidence — REVIEW WR-01's
+///   exact defect path that 03-08's probe missed).
+/// - stage 5: zero-regression — inject `Ime::Preedit("重新截图")` + Redraw
+///   + `Ime::Commit("截图")` + Redraw on the second window's freshly-built
+///   egui-winit State (the "重新截图" candidate buffer preedits via the
+///   fresh State's set_ime_cursor_area path; the "截图" commit matches
+///   `开始截图`'s name tier — the same chain stage 2 drives on the first
+///   window, replayed on the second window's fresh State); assert
+///   `s.input() == "截图"`, `s.state() == Filtering`, and
+///   `s.filtered() == [0]`.
+/// - stage 6: ESC closes the second window — poll for the second
+///   Destroy (created_id is the SECOND window's id after stage 3's
+///   realize_window), then Hidden + no-live-window + no-pending-close
+///   residue assertions and `pass()`.
 ///
-/// Coverage statement (kept honest): the probe injects synthetic Ime events
-/// and covers the winit event → egui-winit → TextEdit → session chain plus
-/// the ime_allowed flag. The OS input-method composition window (candidate
-/// window) appearance/interaction can only be re-verified by human UAT
-/// test 10 on the desktop.
+/// Coverage statement (kept honest, with the re-summon gap closed — GAP-8,
+/// 03-09): the probe injects synthetic Ime events and covers the winit
+/// event → egui-winit → TextEdit → session chain plus the ime_allowed
+/// flag on BOTH the first window (stages 0-2) AND a re-summoned SECOND
+/// window (stages 4-5) — the reset → re-set code path that 03-08's probe
+/// left uncovered is now exercised through the real production closure
+/// (the GAP-8 coverage-hole fix). The OS input-method composition window
+/// (candidate window) appearance/interaction on BOTH the first and the
+/// re-summoned second window can only be re-verified by human UAT test 10
+/// on the desktop (the re-summon scenario) — this probe locks the
+/// code-level IME re-enable path so the 03-08 "10/10 green with a real
+/// defect" gap cannot recur.
 fn check_ime_commit_updates_input() -> Result<(), String> {
     use mybox_core::winit::event::Ime;
     use mybox_core::winit::keyboard::{Key, NamedKey};
@@ -1778,21 +1808,31 @@ fn check_ime_commit_updates_input() -> Result<(), String> {
     let spec = expect_create(&handle)?;
 
     let s = Arc::clone(&session);
+    // GAP-8 re-summon (03-09): the closure re-invokes `summon_palette` on a
+    // SECOND window — mirrors consecutive_summon_close (Arc clones of the
+    // handle AND registry enter the closure scope so the re-summon call
+    // sites match the production summon_palette(&s, &h, &registry_lock,
+    // &ui_lock) signature). Captured `h` is the WindowManagerHandle Arc;
+    // the closure param is renamed to `harness` (the PaletteHarness) so the
+    // stage 3 re-summon can call harness.realize_window(el) and read
+    // harness.created_id exactly like consecutive_summon_close stages 1.
+    let h = Arc::clone(&handle);
     let ui_lock = Arc::clone(&ui_proxy);
+    let registry_lock = Arc::clone(&registry);
     let mut stage = 0u8;
     let harness = PaletteHarness::new(
         Arc::clone(&session),
         Arc::clone(&handle),
         spec,
-        Box::new(move |h, _el, event| {
+        Box::new(move |harness, el, event| {
             let WindowEvent::RedrawRequested = event else { return Ok(()); };
             match stage {
                 0 => {
                     // First frame: the first production-closure invocation
                     // triggers ensure_winit_state — the GAP-7 explicit IME
                     // enable must have happened through the real closure.
-                    h.inject(WindowEvent::RedrawRequested)?;
-                    if h.non_background_pixels() == 0 {
+                    harness.inject(WindowEvent::RedrawRequested)?;
+                    if harness.non_background_pixels() == 0 {
                         return Err("Idle frame must produce non-background pixels".into());
                     }
                     if !s.ime_allowed() {
@@ -1802,14 +1842,14 @@ fn check_ime_commit_updates_input() -> Result<(), String> {
                     }
                     // Start an IME composition (the OS sends Preedit before
                     // Commit during pinyin composition).
-                    h.inject(WindowEvent::Ime(Ime::Preedit("测".to_string(), None)))?;
+                    harness.inject(WindowEvent::Ime(Ime::Preedit("测".to_string(), None)))?;
                     stage = 1;
                     Ok(())
                 }
                 1 => {
                     // Frame that processes the Preedit, then commit.
-                    h.inject(WindowEvent::RedrawRequested)?;
-                    h.inject(WindowEvent::Ime(Ime::Commit("截图".to_string())))?;
+                    harness.inject(WindowEvent::RedrawRequested)?;
+                    harness.inject(WindowEvent::Ime(Ime::Commit("截图".to_string())))?;
                     stage = 2;
                     Ok(())
                 }
@@ -1818,7 +1858,7 @@ fn check_ime_commit_updates_input() -> Result<(), String> {
                     // insert → input_resp.changed → session.set_input. The
                     // committed Chinese text must have reached the session
                     // and triggered filtering.
-                    h.inject(WindowEvent::RedrawRequested)?;
+                    harness.inject(WindowEvent::RedrawRequested)?;
                     if s.input() != "截图" {
                         return Err(format!(
                             "GAP-7: Ime Commit must reach session.input, got {:?}",
@@ -1846,17 +1886,26 @@ fn check_ime_commit_updates_input() -> Result<(), String> {
                             s.filtered()
                         ));
                     }
-                    press_key(&s, &h.handle, &ui_lock, Key::Named(NamedKey::Escape));
+                    press_key(&s, &h, &ui_lock, Key::Named(NamedKey::Escape));
                     stage = 3;
                     Ok(())
                 }
+                // ─── Re-summon extension (03-09, GAP-8 / REVIEW WR-01) ─────
                 3 => {
-                    match h.handle.try_recv() {
+                    // ESC Destroy already enqueued by stage 2's press_key;
+                    // drain the handle for the paired Destroy, assert Hidden
+                    // + no-live-window + no-pending-close residue, then
+                    // re-summon through the production summon_palette path
+                    // (mirrors consecutive_summon_close). summon() resets
+                    // ime_allowed=false + winit_state=None (Task 1) so the
+                    // SECOND window's first event re-enters ensure_winit_state
+                    // and re-issues window.set_ime_allowed(true).
+                    match h.try_recv() {
                         Some(WindowRequest::Destroy(id)) => {
-                            if Some(id) != h.created_id {
+                            if Some(id) != harness.created_id {
                                 return Err(format!(
-                                    "ESC must destroy the created window ({id} != {:?})",
-                                    h.created_id
+                                    "ESC must destroy the first window ({id} != {:?})",
+                                    harness.created_id
                                 ));
                             }
                         }
@@ -1864,9 +1913,122 @@ fn check_ime_commit_updates_input() -> Result<(), String> {
                         _ => return Ok(()),
                     }
                     if s.state() != PaletteState::Hidden {
-                        return Err("ESC must move the session to Hidden".into());
+                        return Err("ESC must move the first-window session to Hidden".into());
                     }
-                    h.pass();
+                    if s.has_live_window() {
+                        return Err("no live window may survive the first close".into());
+                    }
+                    if s.consume_pending_close() {
+                        return Err("pending_close residue after the first close".into());
+                    }
+                    // Re-summon through the production path on a SECOND window.
+                    summon_palette(&s, &h, &registry_lock, &ui_lock)
+                        .map_err(|e| format!("re-summon: {e}"))?;
+                    let spec = expect_create(&h)?;
+                    harness.pending_spec = Some(spec);
+                    harness.realize_window(el)?;
+                    stage = 4;
+                    Ok(())
+                }
+                // ─── Core GAP-8 coverage: reset → re-set evidence ────────
+                4 => {
+                    // Before the second window's first event fires through
+                    // the production closure, ime_allowed must be observable
+                    // in its reset state — `false` (summon() reset evidence).
+                    // GAP-8 reset assertion (03-09): s.ime_allowed() == false
+                    // right before the second window's first event — the
+                    // exact observable contract that 03-08's probe could
+                    // not lock (a per-session ime_allowed stays true and
+                    // the defect hides).
+                    if s.ime_allowed() {
+                        return Err(
+                            "GAP-8: re-summon must reset ime_allowed=false before the second window's first event".into(),
+                        );
+                    }
+                    // First event for the second window: ensure_winit_state
+                    // re-enters the `if !inner.ime_allowed` guard (summon
+                    // reset both ime_allowed and winit_state), builds a fresh
+                    // egui-winit State for the new winit Window, and issues
+                    // window.set_ime_allowed(true) on it.
+                    harness.inject(WindowEvent::RedrawRequested)?;
+                    // GAP-8 re-set assertion (03-09): s.ime_allowed() == true
+                    // after the second window's first event re-entered
+                    // ensure_winit_state through the real production closure
+                    // — the re-set path REVIEW WR-01 said was missing.
+                    if !s.ime_allowed() {
+                        return Err(
+                            "GAP-8: re-summon must re-set ime_allowed=true on the first event of the second window".into(),
+                        );
+                    }
+                    stage = 5;
+                    Ok(())
+                }
+                // ─── Zero-regression: second-window Chinese IME flow ──────
+                5 => {
+                    // The second window's freshly-built egui-winit State
+                    // must accept Chinese IME events through the same winit
+                    // → egui-winit → TextEdit → set_input chain (the 03-09
+                    // VERIFICATION gaps[0].missing[1] suggestion). Use a
+                    // "重新截图" ("re-screenshot") Preedit (the composition
+                    // candidate buffer OS input methods display during pinyin
+                    // jin) followed by a "截图" Commit — the committed text
+                    // enters session.set_input and matches 开始截图's name
+                    // tier (the same chain stage 2 exercises on the first
+                    // window, now replayed on the second window's fresh
+                    // egui-winit State).
+                    harness.inject(WindowEvent::Ime(Ime::Preedit("重新截图".to_string(), None)))?;
+                    harness.inject(WindowEvent::RedrawRequested)?;
+                    harness.inject(WindowEvent::Ime(Ime::Commit("截图".to_string())))?;
+                    harness.inject(WindowEvent::RedrawRequested)?;
+                    if s.input() != "截图" {
+                        return Err(format!(
+                            "GAP-8: second-window IME Commit must reach session.input, got {:?}",
+                            s.input()
+                        ));
+                    }
+                    if s.state() != PaletteState::Filtering {
+                        return Err(format!(
+                            "GAP-8: second-window IME Commit must transition to Filtering, got {:?}",
+                            s.state()
+                        ));
+                    }
+                    if s.filtered() != vec![0] {
+                        return Err(format!(
+                            "GAP-8: second-window IME Commit must filter to [0] (capture.start), got {:?}",
+                            s.filtered()
+                        ));
+                    }
+                    stage = 6;
+                    Ok(())
+                }
+                // ─── Convergence: close the second window ─────────────────
+                6 => {
+                    // ESC closes the second window through the production
+                    // close path; created_id is the SECOND window's id
+                    // (realize_window updated it at the end of stage 3).
+                    press_key(&s, &h, &ui_lock, Key::Named(NamedKey::Escape));
+                    match h.try_recv() {
+                        Some(WindowRequest::Destroy(id)) => {
+                            if Some(id) != harness.created_id {
+                                return Err(format!(
+                                    "GAP-8: ESC must destroy the second window ({id} != {:?})",
+                                    harness.created_id
+                                ));
+                            }
+                        }
+                        // Drain Redraw stragglers; keep polling.
+                        _ => return Ok(()),
+                    }
+                    if s.state() != PaletteState::Hidden {
+                        return Err("GAP-8: ESC must move the second-window session to Hidden".into());
+                    }
+                    if s.has_live_window() {
+                        return Err("GAP-8: no live window may survive the second close".into());
+                    }
+                    if s.consume_pending_close() {
+                        return Err("GAP-8: pending_close residue after the second close".into());
+                    }
+                    harness.pass();
                     Ok(())
                 }
                 _ => Ok(()),
