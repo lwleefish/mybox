@@ -1,136 +1,163 @@
 ---
 phase: 03-命令面板
-reviewed: 2026-08-15T08:56:45Z
+reviewed: 2026-08-17T06:43:32Z
 depth: standard
-files_reviewed: 9
+files_reviewed: 6
 files_reviewed_list:
-  - crates/modules/palette/src/bin/palette_checks.rs
-  - crates/modules/palette/src/lib.rs
-  - crates/modules/palette/src/raster.rs
-  - crates/modules/palette/src/session.rs
+  - crates/modules/palette/src/filter.rs
   - crates/modules/palette/src/ui.rs
+  - crates/modules/palette/src/lib.rs
+  - crates/modules/palette/src/bin/palette_checks.rs
   - crates/modules/palette/tests/integration.rs
-  - crates/mybox-core/src/app.rs
-  - crates/mybox-core/src/command.rs
-  - crates/mybox-core/src/window.rs
+  - .planning/phases/03-命令面板/03-UI-SPEC.md
 findings:
-  critical: 0
-  warning: 4
-  info: 5
-  total: 9
+  critical: 1
+  warning: 3
+  info: 6
+  total: 10
 status: issues_found
 ---
 
 # Phase 03: Code Review Report
 
-**Reviewed:** 2026-08-15T08:56:45Z
+**Reviewed:** 2026-08-17T06:43:32Z
 **Depth:** standard
-**Files Reviewed:** 9
+**Files Reviewed:** 6
 **Status:** issues_found
 
 ## Summary
 
-Adversarial review of the complete Phase 3 command-palette implementation across the palette module (`lib.rs`, `session.rs`, `raster.rs`, `ui.rs`, the `palette_checks` binary, integration tests) and the core support files (`app.rs`, `command.rs`, `window.rs`).
+Review of plan 03-10 (keyword-tier highlight + click-path sync-hide), the final gap-closure wave of Phase 03, diff `c09317a..HEAD` over `crates/`. The filter-layer data channel (`Match.keyword_hit` / `KeywordHit`), the lib.rs Hidden frame-loop guard (`set_visible(false)` + early return), and both new E2E probes are structurally sound — the guard placement (after `egui_ctx.run`, before `apply_textures`) correctly skips paint/present/`request_redraw`, and the click probe's gated-runner ordering assertion (`is_visible()==Some(false)` + `counter==0` before the read-screen) is a genuine improvement over the headless-only coverage that let GAP-2 ship.
 
-The implementation is overall high-quality and heavily regression-locked:
+**However, the gap-1 render layer has a critical defect that the entire verification chain misses:**
 
-- The **rasterizer** (`raster.rs`) is the most scrutinized piece and checks out: the GAP-2 UV-based dispatch follows the epaint contract (`WHITE_UV` + default texture = solid; anything else = textured), the premultiplied blend math was hand-verified (the over-blend cannot overflow u8 because the premultiplied invariant `rgb ≤ a` is preserved through the straight→premultiplied texture multiply), bounds checks are in place, and the −0.5 texel-center UV offset matches GL_LINEAR semantics.
-- The **session state machine** (`session.rs`) guards are sound: generation-guarded `finalize`, `pending_close` build-destroy pairing, bounds-checked in-place texture patching, and the `geometry_revision` counter correctly fixes the old WR-01/WR-02 height-sync and framebuffer-cover regressions.
-- The **GAP-1 pairing path** (`app.rs` `create_window` → `on_created` before the broadcast, drained in the same `about_to_wait` pass) is correct, and the hotkey Pressed-only filter is regression-locked.
-- No secrets, no injection surfaces, no unsafe blocks without SAFETY documentation (the two raw-window-handle `unsafe` blocks in `window.rs` are commented and main-thread-only).
+- **CR-01** — `keyword_tag_job` (ui.rs:481-505) assumes the `" · "` separator is 3 bytes, but it is **4 bytes** (`' '` + U+00B7 middle dot, 2 bytes + `' '`). Every ACCENT byte range is shifted 1 byte left. For the flagship case — query `jt` → keyword `jietu`, indices `[0, 3]` — the code colors the **trailing space (invisible)** at byte 3 and the **`e`** at byte 6 ACCENT, instead of `j` (byte 4) and `t` (byte 7). The unit test at ui.rs:675-677 *asserts these wrong offsets as correct* ("j (char 0 of jietu) is ACCENT" at byte 3), and the E2E probe only asserts "> 0 ACCENT pixels in the band" — so 12/12 integration tests and the 19/39 measured ACCENT px all pass while the shipped highlight is visibly wrong (UAT test 5 will fail). Worse, for **any multi-byte (CJK) keyword-tier hit** the misaligned slicing panics at runtime — verified: `byte index 6 is not a char boundary` for `keyword_tag_job("截图", &[0,1])` — and that panic runs inside the `on_event_win` closure, which is not `catch_unwind`-wrapped (prior WR-02), killing the whole event loop. CJK keyword-tier hits are shadowed by name-tier matches only by coincidence of the current 5-command inventory; any future module command with a CJK keyword and a query that misses name/description reaches the panic through the public `filter_commands`/`Match` API.
 
-No critical issues. Four warnings follow: one is a genuine GAP-7 regression (IME enable is per-session, not per-window — provable from the code and verified against the vendored egui-winit 0.30 source), one is a session wedge on window-creation failure, and two are latent edge-case inconsistencies.
+Prior-review items WR-01 (create-window failure wedges the session), WR-02 (event callbacks not panic-isolated — now *reachable* via CR-01), WR-03 (zero-command fallback clipped at 128px) and IN-01..IN-05 were untouched by 03-10 and remain open. No secrets, no injection surfaces, no new unsafe code (the two existing `objc2` blocks are untouched and documented). The Hidden guard's interaction with `repaint()`/`about_to_wait` Destroy draining was traced: the guard runs before the Destroy drains (window Arc alive), `set_visible(false)` is idempotent on the ESC path, and `repaint()` is a no-op after `close()` — no ordering regression.
 
-## Warnings
+## Critical Issues
 
-### WR-01: GAP-7 IME enable and the egui-winit State are per-session, not per-window — IME is likely dead on the second (and later) summons
+### CR-01: `keyword_tag_job` misaligns every ACCENT range by 1 byte — wrong highlight, and a guaranteed panic on CJK keyword-tier hits
 
-**File:** `crates/modules/palette/src/session.rs:130-149` (`summon`), `session.rs:478-503` (`ensure_winit_state`)
-**Issue:** `ensure_winit_state`'s doc contract says the explicit `set_ime_allowed(true)` runs "the first time the window ever receives an event", and GAP-7 exists because egui-winit's focus-driven multi-frame IME sequence is unreliable on the desktop. But both gates are per-*session*, never reset by `summon()` or `close()`:
+**File:** `crates/modules/palette/src/ui.rs:481-505` (wrong assumption at L489-490, offset math at L492-499); test lock-in at `ui.rs:662-691`; probe blind spot at `crates/modules/palette/src/bin/palette_checks.rs:2048-2066`
 
-1. `ime_allowed` starts `false` and is set `true` once, forever. Every re-summoned window therefore skips the explicit enable (`enable_ime == false`).
-2. `winit_state` is created on the first window's first event and **never torn down** — re-summoned windows reuse the `egui_winit::State` built against the *old* window, including its `allow_ime` debounce flag.
-
-Verified against the vendored egui-winit 0.30.0 source (`lib.rs:848-852`): `handle_platform_output` calls `window.set_ime_allowed()` **only on an `allow_ime` transition**. The standard flow — summon → TextEdit focus (State.allow_ime flips to `true`) → ESC close from Idle → re-summon → new window, TextEdit focused again — produces no transition (`true → true`), so **no code path ever calls `set_ime_allowed(true)` on the second window**, and winit's macOS backend defaults IME to disabled per window. The user cannot type Chinese in the re-summoned palette. (The `five_summon_esc` E2E and human UAT 10 only cover the first summon.) The reused State also carries stale `screen_rect`/focus from the old window — mostly self-healing via Resized events, but the IME flag is not.
-
-**Fix:** Reset the per-window bits on `summon()` (and/or `close()`):
+**Issue:** The separator `" · "` is `' '` (1 byte) + `·` U+00B7 (2 bytes UTF-8: `0xC2 0xB7`) + `' '` (1 byte) = **4 bytes**. The code hardcodes 3:
 ```rust
-// in summon(), next to the existing modifiers reset:
-inner.ime_allowed = false;
-inner.winit_state = None;
-```
-This makes `ensure_winit_state` rebuild the State per window and re-run the explicit IME enable per window — matching the documented GAP-7 contract exactly.
-
-### WR-02: Zero-command summon height is computed inconsistently — window jumps 80 → 128 and the fallback block is clipped
-
-**File:** `crates/modules/palette/src/lib.rs:176` vs `lib.rs:491`
-**Issue:** Two height computations disagree on the minimum row count. `summon_palette` sizes the initial window with `ui::window_height(PaletteState::Idle, all.len())` — with an empty registry that is `80 + 48·0 = 80`. The frame loop's `sync_window_geometry` uses `session.filtered().len().max(1)` — for the same state that is `80 + 48·1 = 128`. On the first frame the window jumps 80 → 128 logical px. Worse, the zero-command fallback (`ui.rs:216-227`, "没有可用的命令") needs 48 (input) + 8 (gap) + 64 (block) + 24 (margins) = 144 logical px, so even at 128 its bottom ~16px is clipped. Unreachable in production today only because `AppBuilder::build` always registers the four builtins — but the code explicitly supports the zero-command state (the UI fallback exists), so the mismatch is a latent defect.
-
-**Fix:** Use the same min-count rule at both sites (the `max(1)` semantics is the correct one for the geometry table), e.g. in `summon_palette`:
-```rust
-let height = ui::window_height(PaletteState::Idle, all.len().max(1));
-```
-
-### WR-03: A failed `App::create_window` wedges the palette session permanently — no recovery path exists
-
-**File:** `crates/mybox-core/src/app.rs:518-521` (`about_to_wait` logs the error only), `crates/modules/palette/src/session.rs:183-208` (`has_live_window`/`close`)
-**Issue:** If window creation fails (e.g. `TinySkiaSoftbufferRenderer::new` fails — the renderer is built *before* `spec.on_created.take()` runs at `app.rs:402-406`), the error is only logged. The session was already moved to `Idle` by `summon`, `window_id` is `None`, and `on_created` never fires, so:
-
-- `has_live_window()` stays `true` forever (state `Idle`).
-- The next hotkey toggle takes the close branch: `close()` sees `was_visible == true`, no window id → sets `pending_close = true` and returns `None` — no window will ever arrive to consume it.
-- Every subsequent toggle hits the `else` branch of `close()` (state already `Hidden`, no id, `was_visible == false`) → returns `None`, `pending_close` stays set, and `has_live_window()` keeps returning `true` — so `toggle_palette` can **never summon again**. The palette is dead until app restart.
-
-**Fix:** Give the session a failure path and call it from `about_to_wait`'s error arm, e.g. add `SessionInner::on_create_failed()` (clears `pending_close`, moves `Idle → Hidden`) and, when `create_window` fails, the App cannot know the session — so the minimal robust option is for `WindowSpec` to carry an `on_create_failed` callback, or for `summon_palette`'s session state to reset via a timeout/generation check. At minimum, `close()` should also clear `pending_close` when `was_visible == false` so a later toggle can re-summon.
-
-### WR-04: `sync_window_geometry` resizes the window to 1px when the frame runs in `Hidden` state
-
-**File:** `crates/modules/palette/src/lib.rs:486-504`
-**Issue:** `sync_window_geometry` computes `window_height(session.state(), ...)`; for `PaletteState::Hidden` that is `0.0`, and `physical_h.max(1)` turns it into a **1px** `request_inner_size` plus a 1px framebuffer reallocation. This is reachable: the click-execute path for `hide_before_execute` commands (`ui.rs:415-419` → `execute::execute` → `set_executing` bumps `geometry_revision` → `close()` moves to `Hidden`) all happens *inside* the frame, and the same frame's revision check then runs the sync. The 1px resize is transient (the Destroy drains moments later) and the next summon reinstalls the framebuffer, so there is no lasting corruption — but the window is briefly resized to 1px and the framebuffer reallocated on every `capture.start` execution.
-
-**Fix:** Early-return when there is nothing to size:
-```rust
-fn sync_window_geometry(...) {
-    if session.state() == PaletteState::Hidden {
-        return;
-    }
+// " · " is bytes 0..3 of `tag`; the keyword starts at byte 3.   // WRONG: keyword starts at byte 4
+job.append(&tag[0..3], 0.0, fmt(TEXT_DIM));
+let mut cursor = 3;
+for (start, end) in char_indices_to_byte_ranges(keyword, indices) {
+    let start = start + 3;   // WRONG: should be +4
+    let end = end + 3;
     ...
 }
 ```
+Two concrete manifestations:
+
+1. **Misplaced highlight (the phase deliverable).** For `keyword_tag_job("jietu", &[0, 3])`, byte offsets come out `[(3,4), (6,7)]` instead of `[(4,5), (7,8)]`: the **space** (byte 3, no glyph ink) and the **`e`** (byte 6) are ACCENT; the actual matched characters `j` (byte 4) and `t` (byte 7) render TEXT_DIM. The user types `jt` and sees ` · jietu` with an orange `e` — not the matched chars. The text is complete (sections cover all 9 bytes), so only the coloring is wrong — which is why both automated checks pass:
+   - `ui.rs:675-677` unit test asserts `(3, ACCENT)` as "j" and `(6, ACCENT)` as "t" — **the test validates the buggy offsets as correct**, so the suite is green with wrong behavior.
+   - `accent_pixels_in_row_band` (palette_checks.rs:2055-2065) counts pixels where `data[i]==0xFF && data[i+1]==0x60 && data[i+2]==0x00` — the misplaced `e` glyph supplies exactly those pixels, so the probe's "19 ACCENT px / 39 ACCENT px" evidence is produced by the wrong character.
+
+2. **Guaranteed panic on non-ASCII keyword hits.** For any keyword containing multi-byte characters, the +3 shift slices at a non-char-boundary and panics. Verified with the exact logic: `keyword_tag_job("截图", &[0, 1])` → `char_indices_to_byte_ranges` yields `[(0,3),(3,6)]` → +3 → `tag[3..6]` → `end byte index 6 is not a char boundary; it is inside '截'`. This is reachable today via the public API (`filter_commands` is `pub`, `KeywordHit.keyword` is `pub`) and becomes trivially reachable as soon as any future module registers a command whose CJK keyword is hit while name/description miss (the current 5-command inventory shadows all CJK keyword-tier hits by name-tier matches only by naming coincidence). The panic occurs inside the frame loop of `on_event_win`, which per prior WR-02 is not wrapped in `catch_unwind` — it kills the entire event loop.
+
+**Fix:** Derive the separator length from the string itself (or hardcode 4 with a comment tying it to the byte layout), and use it consistently; then correct the unit-test offsets so the test guards the *right* characters:
+```rust
+fn keyword_tag_job(keyword: &str, indices: &[usize], size: f32) -> (String, egui::text::LayoutJob) {
+    let sep = " · ";
+    let sep_len = sep.len();            // 4 bytes: ' ' (1) + U+00B7 (2) + ' ' (1)
+    let tag = format!("{sep}{keyword}");
+    let fmt = |color: egui::Color32| egui::TextFormat {
+        color,
+        font_id: egui::FontId::new(size, egui::FontFamily::Proportional),
+        ..Default::default()
+    };
+    let mut job = egui::text::LayoutJob::default();
+    job.append(sep, 0.0, fmt(TEXT_DIM));
+    let mut cursor = sep_len;
+    for (start, end) in char_indices_to_byte_ranges(keyword, indices) {
+        let start = start + sep_len;
+        let end = end + sep_len;
+        if start > cursor {
+            job.append(&tag[cursor..start], 0.0, fmt(TEXT_DIM));
+        }
+        job.append(&tag[start..end], 0.0, fmt(ACCENT));
+        cursor = end;
+    }
+    if cursor < tag.len() {
+        job.append(&tag[cursor..], 0.0, fmt(TEXT_DIM));
+    }
+    (tag, job)
+}
+```
+And fix the unit test to assert the true layout — `sections[1] == (4, ACCENT)` ("j"), `sections[3] == (7, ACCENT)` ("t") — so the test locks the correct offsets instead of the buggy ones. Consider strengthening the E2E probe to assert ACCENT pixels at the keyword's expected x-position rather than "> 0 anywhere in the band", which is position-blind and let this defect ship green.
+
+## Warnings
+
+### WR-01: A failed `App::create_window` wedges the palette session permanently — no recovery path exists
+
+**File:** `crates/mybox-core/src/app.rs:518-521` (error is only logged); `crates/modules/palette/src/session.rs:198-203` (`has_live_window`), `session.rs:210-223` (`close`)
+**Issue:** Unchanged since the previous review — 03-10 did not touch this path. If `create_window` fails after `summon()` moved the session to `Idle` (window_id `None`), the error is only logged; `has_live_window()` stays `true` forever (`pending_close` never clears), so `toggle_palette` can never summon again until app restart. Reachable on headless/SSH, GPU-driver-failure, or display-disconnect systems.
+**Fix:** Add an `on_create_failed` callback on `WindowSpec` (mirroring `on_created`) invoked from `create_window`'s error path, resetting the session to `Hidden` and clearing `pending_close`. (The naive "clear `pending_close` in `close()`'s else branch" is unsafe — it would let a legitimate in-flight create survive a user-intended close.)
+
+### WR-02: `on_event` / `on_event_win` module callbacks are NOT wrapped in `catch_unwind` — a panicking module event closure kills the event loop (now reachable via CR-01)
+
+**File:** `crates/mybox-core/src/app.rs:466-468` (`on_event`), `app.rs:473-476` (`on_event_win`)
+**Issue:** Unchanged since the previous review, but its severity has risen: CR-01's CJK-keyword panic executes inside `on_event_win` (the frame loop → `ui::draw` → `draw_command_row` → `keyword_tag_job`), so the "panic kills the whole event loop with no recovery" scenario has a concrete, verified trigger. The palette closure contains many additional panic surfaces (`Mutex::lock().unwrap()`, `expect("ensure_winit_state ran")`, `egui_ctx.run`/`tessellate`/`raster::paint`).
+**Fix:** Wrap both callbacks in `catch_unwind`, matching `handle_redraw` and the `AppEvent::Ui` dispatch:
+```rust
+if let Some(cb) = &state.spec.on_event_win {
+    if let Some(w) = &state.window {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb(w, &event)));
+    }
+}
+```
+
+### WR-03: Zero-command fallback block (144px) still clipped in the 128px window — `max(1)` achieved consistency, not correctness
+
+**File:** `crates/modules/palette/src/lib.rs:181` (`summon_palette` height), `crates/modules/palette/src/ui.rs:216-227` (zero-command fallback), `ui.rs:59-67` (`window_height`)
+**Issue:** Unchanged since the previous review. Both height sites compute `80 + 48·max(1, n)` = 128 for zero commands, but the fallback block (12 top margin + 48 input + 8 gap + 64 `SP_3XL` block + 12 bottom margin = 144px) is still clipped by ~16px. Latent today (the App always registers ≥4 builtins) but the zero-command state is explicitly supported by the UI code.
+**Fix:** Use the `Empty` geometry (144px) when `commands.is_empty()` at summon and mirror the same conditional in `sync_window_geometry`, or shrink the fallback block to fit 128px.
 
 ## Info
 
 ### IN-01: `run_command` panics on the main thread if the worker thread cannot spawn
 
-**File:** `crates/mybox-core/src/command.rs:239-245`
-**Issue:** `.expect("spawn command runner thread")` runs synchronously in the `execute` chain (`on_palette_key` Enter → `execute::execute` → `run_command`), which is the main-thread event path. Thread-spawn failure (resource exhaustion) panics the whole app instead of surfacing the D-05 Error state.
-**Fix:** Use `std::thread::Builder::spawn(...)` and on `Err`, hop the failure through `ui.run` so `finalize(gen, Err(...))` renders the Error state instead of panicking.
+**File:** `crates/mybox-core/src/command.rs:245` (`.expect("spawn command runner thread")`)
+**Issue:** Unchanged. Thread-spawn failure on the main-thread execute path panics the app instead of surfacing the D-05 Error state.
+**Fix:** Handle `Builder::spawn` `Err` and hop the failure through `ui.run` so `finalize(gen, Err(...))` renders the Error state.
 
 ### IN-02: Opposite lock orderings on `SessionInner` and `egui_ctx` — safe today, fragile tomorrow
 
-**File:** `crates/modules/palette/src/session.rs:481-490` (state → egui_ctx) vs `crates/modules/palette/src/lib.rs:288-292` (egui_ctx guard held while `ui::draw` locks state)
-**Issue:** `ensure_winit_state` locks the session state and then clones the egui context (state → egui_ctx); the frame loop holds the `egui_ctx()` guard across `egui_ctx.run(...)`, inside which `ui::draw` takes the state lock (egui_ctx → state). The two orderings never nest today (both are main-thread sequential and `ensure_winit_state` releases before the run call), so no live deadlock — but any future code that calls a session method from inside a draw closure while also creating winit state would deadlock. Note that WR-01's fix (rebuilding `winit_state` per window) widens the `ensure_winit_state` lock window.
-**Fix:** Document the invariant on both methods ("never call `ensure_winit_state` while holding `egui_ctx()`"), or build the egui-winit State outside the state lock entirely (clone ctx first, then lock).
+**File:** `crates/modules/palette/src/session.rs:493-506` (`ensure_winit_state`: state → egui_ctx); `crates/modules/palette/src/lib.rs:293-322` (frame loop: egui_ctx → state via `ui::draw`)
+**Issue:** Unchanged. Both orderings are main-thread-only and never nest today, but the invariant is undocumented.
+**Fix:** Document "never call `ensure_winit_state` while holding `egui_ctx()`", or clone the `egui::Context` before locking state so both paths take egui_ctx → state.
 
-### IN-03: `PaletteHarness::realize_window`'s comment claims dropping the previous window closes it — the harness WindowManager keeps it alive
+### IN-03: `PaletteHarness::realize_window` comment claims dropping the previous window closes it — the harness WindowManager keeps it alive
 
-**File:** `crates/modules/palette/src/bin/palette_checks.rs:82-124`
-**Issue:** The comment on `realize_window` says replacing `self.window` "drops it closes it", but `wm.register(id, ..., Some(Arc::clone(&window)), ...)` retains an Arc for every round's window in the self-managed `WindowManager`, and nothing ever calls `wm.destroy`. Replaced windows therefore stay alive (and visible on screen) for the duration of the check. Test-harness-only and harmless to the assertions, but the comment is inaccurate and multi-round checks stack up to 5 live palette windows on the desktop.
-**Fix:** Either call `self.wm.destroy(self.created_id.take()...)` before re-registering, or correct the comment.
+**File:** `crates/modules/palette/src/bin/palette_checks.rs:81-124`
+**Issue:** Unchanged. The doc comment is inaccurate: `wm.register` retains an `Arc<Window>` for every round's window and nothing calls `wm.destroy`, so replaced windows stay alive (and visible) for the check duration. Harmless to assertions (`current_winit_id` filters stale events), but misleading and stacks live palette windows on the desktop during multi-round probes.
+**Fix:** Call `self.wm.destroy(self.created_id.take())` before re-registering, or correct the comment.
 
 ### IN-04: `config_dir().unwrap_or_default()` degrades the config/log builtins to an empty path
 
 **File:** `crates/mybox-core/src/app.rs:145-146`
-**Issue:** On config-dir failure, `open_config` opens `""` (macOS `open` with an empty argument errors → the command lands in the Error state) and `open_log` opens the relative path `logs/mybox.log` from the process CWD. The fallback is silently wrong rather than failing loudly.
-**Fix:** Keep the `Option` and have the builtin runners `bail!` with a clear message when the config dir is unavailable, instead of falling back to a bogus path.
+**Issue:** Unchanged. On config-dir failure, `open_config` opens `""` and `open_log` opens a CWD-relative `logs/mybox.log` — silently wrong rather than failing loudly.
+**Fix:** Keep the `Option` and `bail!` in the builtin runners when the config dir is unavailable.
 
 ### IN-05: 64-char query cap makes pasted long input visibly snap back with no feedback
 
-**File:** `crates/modules/palette/src/ui.rs:175-207` + `crates/modules/palette/src/session.rs:275-301`
-**Issue:** The TextEdit buffer is rebuilt every frame from the *truncated* `session.input()` (Security V5), so pasting >64 chars shows the full paste for exactly one frame and then snaps back to 64 chars — no hint that the input was capped. Spec-compliant (the bound is required), but the silent truncation is a UX wart and can fight IME preedit length.
-**Fix:** Clamp at the widget level too (truncate `text` before it is edited / use a `TextEdit` max-length via `char_limit`) so the cap is visible at the point of input rather than a frame later.
+**File:** `crates/modules/palette/src/ui.rs:175-207` + `crates/modules/palette/src/session.rs:290-301`
+**Issue:** Unchanged. The TextEdit buffer is rebuilt every frame from the *truncated* `session.input()`, so pasting >64 chars shows the full paste for exactly one frame, then snaps back with no hint.
+**Fix:** Use `egui::TextEdit::singleline(&mut text).char_limit(filter::MAX_QUERY_LEN)` so the cap is applied at the point of input.
+
+### IN-06: New E2E probe band geometry and accent check are magic-number-coupled to the row layout and position-blind
+
+**File:** `crates/modules/palette/src/bin/palette_checks.rs:2048-2066` (`accent_pixels_in_row_band`), used at `palette_checks.rs:2140-2160` and `palette_checks.rs:2195-2215`
+**Issue:** The band (`y 68..116` = input 12..60 + 8 gap + row 1) and the exact `0xFF,0x60,0x00` pixel triple are hardcoded. Any future layout change (input height, row height, `PANEL_WIDTH`, ACCENT color) silently turns the assertion into either a false failure or — as CR-01 demonstrated — a false *pass*, because the probe asserts pixel *presence* in a band, never pixel *position*. The comment at L2053-2054 even mis-attributes the (buggy) evidence: "the keyword tag's matched glyphs ... render the pure ACCENT color".
+**Fix:** Assert the ACCENT pixels at the expected x-range of the tag's matched chars (computed from `PANEL_WIDTH - text width`), or at minimum extract the band geometry and color into named constants shared with the layout arithmetic, and add a comment that presence-only assertions cannot detect a shift.
 
 ---
 
-_Reviewed: 2026-08-15T08:56:45Z_
+_Reviewed: 2026-08-17T06:43:32Z_
 _Reviewer: the agent (gsd-code-reviewer)_
 _Depth: standard_

@@ -1,84 +1,87 @@
 ---
 phase: 03-命令面板
-verified: 2026-08-15T09:05:45Z
-status: gaps_found
-score: 18/19 must-haves verified
+verified: 2026-08-17T15:30:00Z
+status: human_needed
+score: 25/25 must-haves verified
 overrides_applied: 0
 re_verification:
   previous_status: human_needed
-  previous_score: 11/11
+  previous_score: 21/21
   gaps_closed:
-    - "GAP-3 面板位置漂移 — sync_window_geometry 去重居中（只 request_inner_size 绝不 set_outer_position）+ geometry_revision 修订计数触发器（WR-01 一并关闭）+ resize_framebuffer 帧缓冲伸缩（WR-02 一并关闭）"
-    - "GAP-4 hover 高亮错位 — 行交互/绘制统一到 ScrollArea 内容 ui 坐标系 + item_spacing.y 归零（幻影滚动归零）+ 行内布局落回 48px 行高"
-    - "GAP-5 点击无反应 — 行交互 Sense::click + make_persistent_id 稳定 id + clicked→execute::execute（与 Enter 同语义同守卫）"
-    - "GAP-6 Ctrl+P/N 缺失 — ModifiersChanged 事件流跟踪修饰键 + on_palette_key Ctrl+P/N 守卫臂（等价 ↑/↓ 环绕）+ summon 重置防跨窗口残留"
-    - "GAP-7 前半（前缀发现） — 四个内置命令拼音 keywords（tuichu/peizhi/chongqi/rizhi），fuzzy-matcher 关键词梯队天然支持"
-    - "GAP-7 后半（IME 输入）首次唤出路径 — ensure_winit_state 首次事件显式 window.set_ime_allowed(true)，ime_allowed 标志锁定"
-  gaps_remaining:
-    - "WR-01（本轮新发现，BLOCKER）：IME 显式开启是 per-session 一次性——第二次及以后的唤出窗口不再收到 set_ime_allowed(true)，egui-winit 0.30 allow_ime 去抖无翻转不重开，重唤出面板无法输入中文"
+    - "UAT gap 1 (minor, test 5): keyword 梯队命中无 #FF6000 高亮 — filter.rs Match.keyword_hit 数据通道 + ui.rs keyword tag 渲染（「 · {keyword}」行尾 + 命中字符 ACCENT）双修复落地"
+    - "UAT gap 2 (major, test 11): 鼠标点击执行「开始截图」面板被拍进截图 — lib.rs RedrawRequested 帧循环 Hidden 守卫（egui_ctx.run 之后、apply_textures 之前）window.set_visible(false) 同步隐藏 + 早退"
+    - "CR-01 (Critical, 03-REVIEW): keyword_tag_job 分隔符字节偏移错误 — KEYWORD_TAG_SEP const + sep_len() 推导前缀 + 单测字节偏移修正（j→4、t→7）+ CJK 无 panic 新单测（commit 32561c8）"
+  gaps_remaining: []
   regressions: []
-deferred:
-  - truth: "Windows 上热键 Send 化（HotkeyManager 延迟注册模式）、Windows 字体发现、explorer 打开文件行为"
-    addressed_in: "Phase 4"
-    evidence: "Phase 4 成功标准 3：'命令面板在 Windows 上可唤出并执行命令'；goal '在 Windows 上完成适配'"
-  - truth: "sync_window_geometry 负坐标 clamp（左侧/上方副屏重居中跳主屏）——REVIEW WR-01"
-    addressed_in: "Phase 4"
-    evidence: "Phase 4 goal 明确包含 '多显示器'"
-  - truth: "runner panic 无 catch_unwind 保护（REVIEW WR-03）+ run_command 线程 spawn panic（本轮 IN-01）"
-    addressed_in: "Phase 4"
-    evidence: "Phase 4 goal 明确包含 '错误处理打磨' + plan 04-02 'DPI 缩放修复 + 错误处理打磨'"
-  - truth: "窗口创建失败会永久卡住 pending_close（本轮 REVIEW WR-03 重申）"
-    addressed_in: "Phase 4"
-    evidence: "Phase 4 goal '错误处理打磨' + plan 04-02；缺陷仅经创建失败路径可达（softbuffer surface 失败），生产正常路径不受影响"
-gaps:
-  - truth: "面板【每一次】窗口创建后即显式请求 IME 允许（GAP-7 输入子问题在重唤出场景同样消除）"
-    status: failed
-    reason: "IME 显式开启是 per-session 一次性：ime_allowed 标志置位后永不复位、egui-winit State 创建一次永不重建（summon/close 均无复位）。第二次及以后的唤出窗口不再收到 set_ime_allowed(true)。且 egui-winit 0.30 的去抖（vendored source lib.rs:848-852 已验证：仅 allow_ime 翻转时调用 window.set_ime_allowed）在复用 State 时 allow_ime 保持 true → 无翻转 → 永不重开；winit macOS 后端每窗口默认禁用 IME。结论：ESC/热键关闭后重唤出（GAP-1 强制打牢的核心循环，UAT 测试 1 的同一流程），中文输入法再次不可用。现有 ime_commit_updates_input 探针只覆盖首次唤出，10/10 集成测试未能捕获此洞。"
-    artifacts:
-      - path: "crates/modules/palette/src/session.rs"
-        issue: "summon() (130-149) 只复位 modifiers/input/selection 等，不复位 ime_allowed=false 与 winit_state=None；ensure_winit_state (478-503) 的 ime_allowed 守卫一次生效后永不复位，winit_state 只创建一次"
-      - path: "crates/modules/palette/src/bin/palette_checks.rs"
-        issue: "check_ime_commit_updates_input (1753+) 仅单次唤出（stage 0 断言首次事件 ime_allowed 标志），无 ESC 关闭→再唤出的重唤出阶段，覆盖声明未承诺第二窗口 IME 断言"
-    missing:
-      - "summon()（或 close() 等价路径）复位 inner.ime_allowed = false 与 inner.winit_state = None，使每次窗口创建都重新执行显式 window.set_ime_allowed(true) 并针对新窗口重建 egui-winit State（REVIEW WR-01 的修复建议）"
-      - "E2E 探针 ime_commit_updates_input 增加重唤出阶段：summon → ESC 配对 Destroy → 再 summon → 断言第二窗口的 ime_allowed 复位→重新置位路径被行使（可加 Ime::Commit 中文断言于第二窗口）"
-      - "建议同一 gap-closure 计划顺带修复同函数两个 warning：WR-04（sync_window_geometry 对 Hidden 态加早退，避免 capture.start 点击执行路径的 1px resize）与 WR-02（summon_palette 初始高度 all.len() 改 all.len().max(1)，与帧循环同步规则一致）"
+requirements:
+  - id: PAL-01
+    status: satisfied
+    evidence: "REQUIREMENTS.md:39 [x] Complete；consecutive_summon_close 探针实跑 PASS（回归）；重唤出 IME 可达性 03-09 关闭"
+  - id: PAL-02
+    status: satisfied
+    evidence: "REQUIREMENTS.md:40 [x] Complete；glyph_shape 探针实跑 aa_spread=242（回归）"
+  - id: PAL-03
+    status: satisfied
+    evidence: "REQUIREMENTS.md:41 [x] Complete；fuzzy_navigation_execute + keyword_highlight 探针实跑 PASS（03-10 强化 keyword 梯队高亮全路径）"
+  - id: PAL-04
+    status: satisfied
+    evidence: "REQUIREMENTS.md:42 [x] Complete；hover_click_alignment + ctrl_pn_navigation + click_hide_before_capture 探针实跑 PASS（03-10 强化点击路径时序与 Enter 一致）"
+  - id: PAL-05
+    status: satisfied
+    evidence: "REQUIREMENTS.md:43 [x] Complete；five_summon_esc_no_residue 实跑 PASS；click_hide_before_capture stage 3 Destroy 配对断言"
+human_verification:
+  - test: "UAT 5 重跑（keyword 高亮——03-10 关闭项）——输入 jt / jietu / tuichu / peizhi / chongqi / rizhi，观察命令行 description 行尾的「 · {keyword}」标签"
+    expected: "命中命令排前，且标签中命中的拼音字符（如 j/t）以 #FF6000 橙色高亮（E2E 探针已断言帧缓冲 ACCENT 像素 16/51 px；肉眼可见正确性需人工确认）"
+    why_human: "OS 渲染链路的最终视觉效果（命中字符正确着色、非错位/非 e 字符）只能真人观察"
+  - test: "UAT 11 重跑（鼠标点击截图时序——03-10 关闭项）——在面板中用鼠标点击「开始截图」"
+    expected: "面板在截图覆盖层出现前已关闭，截图画面中绝不含面板本身（探针已断言 is_visible()==Some(false) 且 gated 读屏计数器==0；OS 合成器级真实截图需人工确认）"
+    why_human: "真实截图的屏幕内容只能人工查看；探针经合成指针事件 + gated 模拟读屏锁定时序，物理鼠标链路留待人工"
+  - test: "UAT 1 重跑（物理热键循环）——按 Cmd+Shift+Space 唤出→再按关闭→再唤出 ≥3 轮；执行「开始截图」后再唤出"
+    expected: "每次保持显示不闪退"
+    why_human: "探针走 bus 级 summon，OS 热键注册→回调链路只能真人验证"
+  - test: "UAT 4 重跑（内置命令 OS 副作用）——执行退出/重启/打开配置目录/打开日志"
+    expected: "各自 OS 副作用正确（进程生命周期/文件管理器打开正确位置）"
+    why_human: "进程生命周期/文件管理器无法在验证进程内执行"
+  - test: "UAT 10 重跑（真实输入法——首次唤出 AND ESC 关闭后重唤出）——两次都输入中文"
+    expected: "候选窗两次都出现、可正常组合输入（03-09 GAP-8 已代码层关闭；OS 候选窗出现/交互仍只能人工确认）"
+    why_human: "OS 候选窗出现/交互无法合成；探针仅注入合成 Ime 事件，不经 OS 输入法组合链路"
 ---
 
-# Phase 3: 命令面板 Verification Report（Re-verification — gap closure 03-05..03-08）
+# Phase {3}: 命令面板 Verification Report（Re-verification — after 03-10 gap closure）
 
 **Phase Goal:** 实现命令面板作为所有模块的统一交互入口。全局快捷键唤出，展示已注册命令，模糊搜索，键盘导航执行。
 **Mode:** mvp
-**Verified:** 2026-08-15T09:05:45Z
-**Status:** gaps_found
-**Re-verification:** Yes — after gap closure（previous: human_needed 11/11；本轮 18/19，1 个新 BLOCKER）
+**Verified:** 2026-08-17T15:30:00Z
+**Status:** human_needed
+**Re-verification:** Yes — after 03-10 gap closure（previous: human_needed 21/21；本轮 25/25，UAT 2 个留存 gap + 03-REVIEW CR-01 全部代码层关闭，5 项人工 UAT 待执行）
 
-> **MVP 模式格式守卫（Escalation 项，上上轮提出、上轮重申、本轮复检仍不满足）：** `gsd-sdk query user-story.validate` 对 ROADMAP Phase 3 goal 返回 `false`（本 verifier 本轮重新执行确认）。plan-level 用户故事（03-01：唤出面板并看到全部命令；03-02：输入过滤/键盘选择执行）可规范，本报告据此构建用户流程覆盖。**建议用户运行 `/gsd mvp-phase 03` 将 ROADMAP goal 重写为用户故事格式**——不阻塞本验证（5 条成功标准无歧义），但 UAT 脚本生成质量依赖它。
+> **MVP 模式格式守卫（Escalation 项，延续前轮）：** Phase 3 ROADMAP goal 非「As a…, I want to…, so that…」用户故事格式。`gsd-sdk query user-story.validate` 返回 `false`（本 verifier 复核确认）。不阻塞验证（5 条成功标准无歧义），沿用前轮决定继续验证。建议用户运行 `/gsd mvp-phase 03` 重写 goal 为用户故事格式。
 
 ## 验证结论（先行）
 
-**03-05..03-08 四个 gap-closure 计划本 verifier 全部实跑复验（非仅信 SUMMARY）：**
+**03-10 gap-closure 计划（最后 1 个 plan，10/10）本 verifier 全部实跑复验（非仅信 SUMMARY）——UAT 2 个留存 gap 代码层关闭确认 + CR-01 Critical 修复落地确认：**
 
-- **GAP-3 关闭确认** — `sync_window_geometry` 函数体内确无 `set_outer_position`（lib.rs:486-505，只 request_inner_size + resize_framebuffer）；geometry_revision 在 summon/set_input/set_executing-成功/finalize-Err 四类转变递增（session.rs:133/282/539/579）。E2E `position_stable_on_filter` 本 verifier 桌面会话实跑 PASS：过滤收缩 320→128、恢复 128→320、Executing 增高 320→352 三阶段 outer_position 与召唤原点**精确相等**、帧缓冲全程覆盖窗口物理尺寸。
-- **GAP-4/5 关闭确认** — `draw_command_row` 使用 `ui.interact(row_rect, make_persistent_id(("palette-row", cmd.id)), Sense::click())` + `resp.clicked()` → `execute::execute`（ui.rs:397-419）；行绘制走 ScrollArea 内容 ui 的 `ui.painter()`（ui.rs:332）；`item_spacing.y = 0.0`（ui.rs:137/329）；name/desc 布局落回 48px 行高。E2E `hover_click_alignment` 本 verifier 实跑 PASS：**hover_px_in_band=94049、hover_px_above_band=0、text_px_in_band=16549**（@2x），点击经真实事件链进入 Executing、gated runner 恰好执行一次。
-- **GAP-6 关闭确认** — `on_event_win` 闭包 `WindowEvent::ModifiersChanged(m) => session.set_modifiers(m.state())`（lib.rs:237-239，不早退）；`on_palette_key` 含 modifiers 参数与两个 `Key::Character` Ctrl 守卫臂（lib.rs:438-447，winit 0.30 NamedKey 无字母变体属实——0.31 概念）；summon 重置修饰键（session.rs:137）。E2E `ctrl_pn_navigation` 本 verifier 实跑 PASS：真实 ModifiersChanged 注入 → 环绕断言（Some(2)/Some(0)）→ 清空断言 → 无修饰键 ESC 回归。
-- **GAP-7 部分关闭（见 BLOCKER）** — 拼音 keywords 四个字面量落位（command.rs:111/134/150/179）且单测锁定；`ensure_winit_state` 锁外 `window.set_ime_allowed(true)`（session.rs:500）。E2E `ime_commit_updates_input` 本 verifier 实跑 PASS：ime_allowed 标志、中文 Commit → session.input=="截图" → filtered [0]、`tuichu` → filtered [1] 全部断言通过。**但首次唤出之外的窗口路径存在 REVIEW WR-01 缺陷（见下）——GAP-7 只对首次唤出关闭。**
+- **Gap 1 关闭（keyword 梯队高亮，UAT test 5）** — filter.rs `KeywordHit`（L52-56，自带 `#[derive(Clone, Debug, PartialEq, Eq)]`）+ `Match.keyword_hit: Option<KeywordHit>`（L44）；keyword 梯队分支改用 `fuzzy_indices` 逐 keyword 取最高分（L122-140，无 `fuzzy_match` 残留调用——仅 doc 注释提及）；空查询/name/description 分支均显式 `keyword_hit: None`（L89/111/114）。渲染层 ui.rs `keyword_tag_job`（L487-512）+ `KEYWORD_TAG_SEP` const（L485）+ `draw_command_row` 追加 keyword_hit 参数（L386）并在 desc 行尾渲染 tag（L434-443），`draw_command_list` 传 `hl.and_then(|m| m.keyword_hit.as_ref())`（L351）。单测：`query_jietu_hits_capture_via_pinyin_keyword` 断言 `KeywordHit { keyword: "jietu", indices: vec![0, 3] }`（L228-233）；`pinyin_keywords_all_carry_keyword_hit` 覆盖 tuichu/peizhi/chongqi/rizhi 全梯队（L238-269）；`name_tier_match_has_no_keyword_hit` + `empty_query_has_no_keyword_hit`（L271-293）。E2E 探针 `check_keyword_highlight` 本 verifier 桌面会话实跑：jt 阶段 16 ACCENT px、tuichu 阶段 51 ACCENT px（行 1 带内精确 #FF6000）。
+- **Gap 2 关闭（点击路径截图时序，UAT test 11）** — lib.rs RedrawRequested 帧循环在 `egui_ctx.run`（L297）之后、`apply_textures`（L314）之前插入 Hidden 守卫（L309-312）：`if session.state() == PaletteState::Hidden { window.set_visible(false); return; }`——点击帧内 execute→close→Hidden 后同步隐藏窗口（macOS orderOut 即时）并跳过本帧 paint/present/request_redraw。E2E 探针 `check_click_hide_before_capture` 本 verifier 桌面会话实跑 PASS：stage 0 基线 `is_visible()==Some(true)`（防空洞断言）→ stage 3 断言 `state==Hidden` + `is_visible()==Some(false)` + gated 读屏计数器==0 + Destroy 已入队 → stage 4 释放后 counter==1 且无二次 Destroy（finalize 守卫 no-op）。execute.rs 未被改动（`git diff 2897afd..HEAD -- crates/modules/palette/src/execute.rs` 空）。
+- **CR-01 修复确认（03-REVIEW Critical，commit 32561c8）** — `KEYWORD_TAG_SEP: &str = " · "` const（ui.rs L485）+ `sep_len() = KEYWORD_TAG_SEP.len()` 推导前缀（L489，杜绝硬编码 3）；单测字节偏移修正为 4/7（L683/L685）；新增 `keyword_tag_job_cjk_keyword_does_not_panic_and_marks_correct_chars`（L701-722，断言「截图」命中段 ACCENT 4..10 无 panic）。git show 确认 diff 仅触及 ui.rs（+KEYWORD_TAG_SEP/sep_len/偏移修正/CJK 测试），与 SUMMARY 声称一致。
+
+**质量账本（本 verifier 实跑）：** `cargo nextest run --workspace` **233 passed / 0 failed**（20 skipped）；`cargo check --workspace` exit 0 **无 warning**；`cargo build -p mybox-palette --bin palette_checks` exit 0；`cargo test -p mybox-palette --test integration -- --ignored` **12/12 PASS** in 3.67s（含 keyword_highlight 16/51 ACCENT px + click_hide_before_capture 全 stage 断言）；`cargo nextest run -p mybox-palette filter::` 10/10；`cargo nextest run -p mybox-palette ui::` 8/8。
 
 ## User Flow Coverage (MVP Mode)
 
-User story（合并 03-01 + 03-02 的 plan-level 用户故事）：
+User story（合并 03-01 + 03-02 plan-level 用户故事，ROADMAP goal 非用户故事格式——见上方守卫）：
 «As a mybox 用户, I want to 按全局快捷键唤出屏幕中央的命令面板浮窗、看到全部已注册命令、输入关键词即时过滤、用方向键/鼠标/Ctrl+P/N 选择并执行命令, so that 所有工具通过一个统一入口触手可及。»
 
 | Step | Expected | Evidence | Status |
 |------|----------|----------|--------|
-| 按 Cmd+Shift+Space | 活动显示器中央出现无边框置顶浮窗 | app.rs Pressed 守卫 + lib.rs hotkey→toggle + on_created 配对（上轮已验，无改动）；consecutive_summon_close 探针本 verifier 实跑 PASS | ✓（物理按键留待 UAT 1） |
-| 再按热键/ESC 关闭后再唤出 | 面板保持显示不闪退；位置不漂移 | consecutive_summon_close + position_stable_on_filter（三阶段 outer_position 精确相等）本 verifier 实跑 PASS | ✓ |
-| 看到命令列表（文字可读） | 中文命令名/描述/占位符为可识别字形 | glyph_shape 本 verifier 实跑：bbox=1200x288 non_bg=24248 kinds=53 **aa_spread=242** | ✓ |
-| 输入「截图」/「jt」/「tuichu」 | 命中命令、命中字符高亮、面板位置不动 | fuzzy_navigation_execute + position_stable_on_filter + ime_commit_updates_input（拼音命中断言）本 verifier 实跑 PASS | ✓ |
-| 鼠标 hover / 点击行 | 高亮与文字同矩形；点击执行 | hover_click_alignment 本 verifier 实跑：带内 94049 高亮像素、行上带 0、文字与高亮同带、点击→执行 | ✓ |
-| ↑/↓/Ctrl+P/Ctrl+N/Enter | 环绕导航、回车执行、执行中面板保持 | fuzzy_navigation_execute + ctrl_pn_navigation 本 verifier 实跑 PASS | ✓ |
-| 中文输入（IME） | 输入框可输入中文并过滤 | **首次唤出**：ime_commit_updates_input 实跑 PASS；**重唤出（ESC 关闭后再唤出）**：代码可证 IME 不会重开（REVIEW WR-01，见 BLOCKER gap） | ✗ 首次 ✓ / 重唤出 ✗ |
-| Outcome | 统一入口可用——快捷键唤出、键盘/鼠标全程操作、文字清晰 | 228 单测 + 10/10 E2E + cargo check 全绿（本 verifier 实跑） | ✓（含 1 个重唤出 IME 洞） |
+| 按 Cmd+Shift+Space | 活动显示器中央出现无边框置顶浮窗 | app.rs:325 Pressed 守卫 + on_created 配对（回归）；consecutive_summon_close 探针实跑 PASS | ✓（物理按键留待 UAT 1） |
+| 再按热键/ESC 关闭后再唤出 | 面板保持显示不闪退；位置不漂移；重唤出可输入中文 | consecutive_summon_close + position_stable_on_filter + ime_commit_updates_input 重唤出 stages 实跑 PASS | ✓ |
+| 看到命令列表（文字可读） | 中文命令名/描述/占位符为可识别字形 | glyph_shape 实跑 aa_spread=242 | ✓ |
+| 输入「截图」/「jt」/「tuichu」 | 命中命令排前、命中字符高亮、位置不动 | fuzzy_navigation_execute + position_stable_on_filter 实跑 PASS；**keyword_highlight 实跑 PASS（jt→capture.start 16 ACCENT px、tuichu→builtin.quit 51 ACCENT px——Gap 1 关闭）** | ✓（橙色高亮肉眼可见留待 UAT 5） |
+| 鼠标 hover / 点击行 | 高亮与文字同矩形；点击执行 | hover_click_alignment 实跑 PASS；**click_hide_before_capture 实跑 PASS（点击→Hidden→is_visible()==Some(false)→读屏前隐藏——Gap 2 关闭）** | ✓（真实截图内容留待 UAT 11） |
+| ↑/↓/Ctrl+P/Ctrl+N/Enter | 环绕导航、回车执行、执行中面板保持 | fuzzy_navigation_execute + ctrl_pn_navigation 实跑 PASS | ✓ |
+| 中文输入（IME）——首次唤出 + 重唤出 | 输入框可输入中文并过滤 | ime_commit_updates_input 全 stage（含 03-09 重唤出扩展）实跑 PASS | ✓（OS 候选窗留待 UAT 10） |
+| Outcome | 统一入口可用——快捷键唤出、键盘/鼠标全程操作、文字清晰、拼音关键词命中高亮、点击截图不含面板 | 233 单测 + 12/12 E2E + cargo check/build 全绿（本 verifier 实跑） | ✓ |
 
 ## Goal Achievement
 
@@ -86,27 +89,18 @@ User story（合并 03-01 + 03-02 的 plan-level 用户故事）：
 
 | # | Truth | Status | Evidence |
 |---|-------|--------|----------|
-| SC-1 | 用户按全局快捷键唤出命令面板浮窗（PAL-01） | ✓ VERIFIED（回归） | 上轮链路无改动；consecutive_summon_close 实跑 PASS |
-| SC-2 | 面板列出截图模块注册的命令（PAL-02） | ✓ VERIFIED（回归） | glyph_shape 实跑 PASS（CJK 命令名字形结构断言） |
-| SC-3 | 输入关键词可模糊过滤命令列表（PAL-03） | ✓ VERIFIED（回归+强化） | fuzzy_navigation_execute + ime_commit_updates_input（tuichu 拼音命中）实跑 PASS |
-| SC-4 | 方向键选择命令，回车执行对应功能（PAL-04） | ✓ VERIFIED（回归+强化） | fuzzy_navigation_execute + hover_click_alignment + ctrl_pn_navigation 实跑 PASS |
+| SC-1 | 用户按全局快捷键唤出命令面板浮窗（PAL-01） | ✓ VERIFIED（回归） | consecutive_summon_close 探针实跑 PASS |
+| SC-2 | 面板列出截图模块注册的命令（PAL-02） | ✓ VERIFIED（回归） | glyph_shape 探针实跑 aa_spread=242 |
+| SC-3 | 输入关键词可模糊过滤命令列表（PAL-03） | ✓ VERIFIED（回归+强化） | fuzzy_navigation_execute + keyword_highlight 实跑 PASS |
+| SC-4 | 方向键选择命令，回车执行对应功能（PAL-04） | ✓ VERIFIED（回归+强化） | hover_click_alignment + ctrl_pn_navigation + click_hide_before_capture 实跑 PASS |
 | SC-5 | 按 ESC 关闭命令面板（PAL-05） | ✓ VERIFIED（回归） | five_summon_esc_no_residue 实跑 PASS |
-| 03-05-T1 | 过滤改变命令项数量时窗口高度收缩/恢复但位置保持不动（GAP-3） | ✓ VERIFIED | sync_window_geometry 无 set_outer_position（lib.rs:486-505）；position_stable_on_filter 实跑：三阶段 outer_position == summon 原点精确相等 |
-| 03-05-T2 | 状态转变（Executing/Error）同样触发高度同步且不移动窗口（WR-01） | ✓ VERIFIED | geometry_revision 四类转变递增（session.rs:133/282/539/579）+ 帧循环修订计数比对（lib.rs:332-337）；探针 stage 3 Executing 增高 320→352 位置零漂移 |
-| 03-05-T3 | 窗口增高后新区域正常绘制——帧缓冲始终覆盖窗口物理尺寸（WR-02） | ✓ VERIFIED | resize_framebuffer（session.rs:391）+ sync 调用点（lib.rs:504）；探针三阶段帧缓冲 1200×{256,640,704} 全程覆盖断言 |
-| 03-06-T1 | hover 高亮块与该行文字区域精确重叠（GAP-4） | ✓ VERIFIED | 内容 ui painter（ui.rs:332）+ item_spacing.y=0（ui.rs:137/329）；探针 hover_px_above_band=0、text_px_in_band=16549 |
-| 03-06-T2 | 行内 name/description 完整落在 48px 行高内 | ✓ VERIFIED | name_pos=row.top+SP_SM、desc_pos=name 底+SP_XS（ui.rs:422-423）；单测 row_geometry_fits_48px（228/228 全绿） |
-| 03-06-T3 | 点击命令项执行对应命令（GAP-5） | ✓ VERIFIED | Sense::click + clicked→execute::execute（ui.rs:397-419）；探针点击→Executing→gated runner 恰好一次；headless 单测 row_interact_hovers_and_clicks_execute |
-| 03-06-T4 | 列表无幻影滚动（n 行内容高度 == 视口高度） | ✓ VERIFIED | item_spacing.y 归零 + allocate_rect 精确预留；探针 hover 填充精确落 68..116 行带（无偏移证据） |
-| 03-07-T1 | Ctrl+P/N 与 ↑/↓ 等价（环绕），Idle/Filtering 生效（GAP-6） | ✓ VERIFIED | 守卫臂 lib.rs:438-447；ctrl_pn_navigation 实跑：Idle 无选中 Ctrl+P→Some(2)（环绕末位）、Ctrl+N→Some(0) |
-| 03-07-T2 | 普通 P/N 输入不被路由消费（无 Ctrl 透传 TextEdit） | ✓ VERIFIED | 守卫不满足落 `_ => false`（lib.rs:473）；单测 plain_p_without_ctrl_is_not_consumed 实跑通过 |
-| 03-07-T3 | Error 态 Ctrl+P/N 仍走「任意键关闭」 | ✓ VERIFIED | Error 首臂优先（lib.rs:415-418）；单测 ctrl_pn_in_error_state_closes_panel 实跑通过 |
-| 03-07-T4 | 修饰键经真实 ModifiersChanged 跟踪，新窗口唤出重置 | ✓ VERIFIED | lib.rs:237-239 接线 + session.rs:137 summon 重置；探针真实事件注入 + 单测 summon_resets_modifiers |
-| 03-08-T1 | **每一次**面板窗口创建后即显式请求 IME 允许（GAP-7 输入子问题） | ✗ FAILED | **首次唤出** ✓：ensure_winit_state 显式 set_ime_allowed(true)（session.rs:500）+ 探针 ime_allowed 标志断言。**重唤出** ✗：ime_allowed 一次置位永不复位、winit_state 永不重建（summon/close 均无复位）；egui-winit 0.30 去抖仅在 allow_ime 翻转时调用 set_ime_allowed（vendored lib.rs:848-852 已验证）→ 复用 State 无翻转 → 新窗口永不重开；winit macOS 每窗口默认禁用 IME → 中文输入死。探针只覆盖首次唤出（BLOCKER gap，见 frontmatter） |
-| 03-08-T2 | 注入 Ime::Commit 中文经完整链路进入输入并触发过滤 | ✓ VERIFIED | ime_commit_updates_input 实跑：input=="截图"、Filtering、filtered==[0] |
-| 03-08-T3 | 四个内置命令可用拼音关键词命中（前缀发现路径） | ✓ VERIFIED | command.rs:111/134/150/179 + 单测 builtin_keywords_include_pinyin_aliases；探针 tuichu→filtered [1] |
+| 03-10-T1 | 输入「jt」/「jietu」时「开始截图」命中排前，命中的拼音 keyword 字符以 #FF6000 高亮 | ✓ VERIFIED（**03-10 关闭**） | filter.rs keyword_hit（jietu + indices [0,3] 单测断言）+ ui.rs keyword tag 渲染（KEYWORD_TAG_SEP + sep_len 推导——CR-01 修复）+ E2E jt 阶段 16 ACCENT px |
+| 03-10-T2 | 全部拼音 keyword（jietu/tuichu/peizhi/chongqi/rizhi）命中路径同机制显示 keyword 文本 + #FF6000 高亮 | ✓ VERIFIED（**03-10 关闭**） | filter.rs `pinyin_keywords_all_carry_keyword_hit`（4 keyword 逐一断言 keyword+indices 非空）+ E2E tuichu 阶段 51 ACCENT px（行 1 带内精确 #FF6000） |
+| 03-10-T3 | 鼠标点击执行「开始截图」时窗口在点击帧内同步隐藏（window.is_visible() == Some(false)），Destroy 排出前已从屏幕消失 | ✓ VERIFIED（**03-10 关闭**） | lib.rs L309-312 Hidden 守卫（egui_ctx.run 后、apply_textures 前）+ 探针 stage 3 断言 is_visible()==Some(false) + gated 读屏 counter==0 |
+| 03-10-T4 | Enter 与鼠标点击两条路径时序一致：面板先关闭、不再出现 | ✓ VERIFIED（**03-10 关闭**） | 探针 stage 3 Hidden + Destroy 已入队 + stage 4 释放后 counter==1 且无二次 Destroy（finalize generation 守卫 no-op） |
+| 03-10-T5 | CR-01 修复：keyword tag 字节偏移正确（KEYWORD_TAG_SEP + sep_len 推导），CJK keyword 不 panic | ✓ VERIFIED（**03-10 修复**） | commit 32561c8；ui.rs L485 const + L489 sep_len；单测偏移 4/7（L683/685）+ CJK 无 panic 测试（L701-722）实跑 PASS |
 
-**Score:** 18/19 truths verified（5 roadmap SC + 14 gap-closure truths；03-08-T1 首次唤出分支成立、重唤出分支失败）
+**Score:** 25/25 truths verified（5 roadmap SC + 14 前轮 gap-closure truths + 03-09 2 truths 回归 + 本轮 03-10 新增 4 truths + CR-01 修复 1 truth；Gap 1/Gap 2/CR-01 全分支成立）
 
 ### Deferred Items
 
@@ -114,125 +108,137 @@ User story（合并 03-01 + 03-02 的 plan-level 用户故事）：
 |---|------|-------------|----------|
 | 1 | Windows 热键 Send 化、字体发现、explorer 打开文件行为 | Phase 4 | Phase 4 SC-3 + goal（Windows 适配） |
 | 2 | sync_window_geometry 负坐标 clamp（多显示器） | Phase 4 | Phase 4 goal「多显示器」 |
-| 3 | runner panic 无 catch_unwind（含本轮 IN-01 线程 spawn panic） | Phase 4 | Phase 4 goal「错误处理打磨」+ plan 04-02 |
-| 4 | 窗口创建失败永久卡死 pending_close（本轮 REVIEW WR-03 重申） | Phase 4 | Phase 4 goal「错误处理打磨」+ plan 04-02；仅创建失败路径可达，不影响正常使用 |
+| 3 | runner panic 无 catch_unwind（IN-01）+ on_event/on_event_win 回调未包 catch_unwind（REVIEW WR-02） | Phase 4 | Phase 4 goal「错误处理打磨」+ plan 04-02 |
+| 4 | 窗口创建失败永久卡死 pending_close（REVIEW WR-01） | Phase 4 | Phase 4 goal「错误处理打磨」+ plan 04-02；仅创建失败路径可达 |
+| 5 | 零命令 fallback 块 144px 在 128px 窗口被裁切（REVIEW WR-03） | Phase 4 | 生产恒有 ≥4 内置命令不可达；latent |
 
 ### Required Artifacts
 
 | Artifact | Expected | Status | Details |
 |----------|----------|--------|---------|
-| crates/modules/palette/src/session.rs | geometry_revision 修订计数 + resize_framebuffer + modifiers 跟踪 + ime_allowed 标志 | ✓ VERIFIED | 66/112 字段与构造；133/282/539/579 四类递增；391 伸缩（同尺寸零分配）；232/247 修饰键访问器；478-503 IME 显式开启（锁外 winit 调用） |
-| crates/modules/palette/src/lib.rs | sync_window_geometry 去重居中 + 修订计数触发 + ModifiersChanged 接线 + Ctrl+P/N 守卫臂 + ui::draw 接线 | ✓ VERIFIED | 486-505（无 set_outer_position）；332-337（revision 比对）；237-239（modifiers 事件流）；438-447（Ctrl 臂）；292（ui::draw 4 参） |
-| crates/modules/palette/src/ui.rs | draw 签名扩展 + draw_command_row 重写（content-ui painter / Sense::click / clicked→execute / 48px 布局）+ item_spacing 归零 | ✓ VERIFIED | 91-96 签名；137/329 spacing；332 行 painter；397-419 交互与点击执行；422-423 布局；2 个新单测 |
-| crates/mybox-core/src/command.rs | 四个内置命令拼音 keywords | ✓ VERIFIED | 111/134/150/179 + 单测 440-468 |
-| crates/modules/palette/src/bin/palette_checks.rs | 4 个新探针 + window_outer_position/window_inner_size/press_key_mods 辅助 + main 分发 | ✓ VERIFIED | 1148/1372/1597/1753 四探针；149/158 辅助；280 press_key_mods；1890-1893 main 分发 |
-| crates/modules/palette/tests/integration.rs | 4 个新 #[ignore] 测试接线（总计 10） | ✓ VERIFIED | 100-153 十测试全部接线，文档注释含 PAL/GAP 映射 |
+| crates/modules/palette/src/filter.rs | `Match.keyword_hit` + `KeywordHit`（keyword 字符串 + fuzzy_indices 字符索引）；keyword 梯队取最高分 | ✓ VERIFIED | L52-56 KeywordHit（自带 derive）；L44 keyword_hit 字段；L122-140 梯队分支 fuzzy_indices + best-score；L89/111/114 其余分支 None |
+| crates/modules/palette/src/ui.rs | `keyword_tag_job` 渲染「 · {keyword}」+ 命中字符 ACCENT #FF6000；`draw_command_row` 接收 keyword_hit | ✓ VERIFIED | L487-512 keyword_tag_job；L485 KEYWORD_TAG_SEP；L386/434-443 渲染；L351 传参；L26 ACCENT=#FF6000；CR-01 修复落地 |
+| crates/modules/palette/src/lib.rs | RedrawRequested 帧循环 Hidden 守卫 + `window.set_visible(false)` 同步隐藏早退 | ✓ VERIFIED | L297 egui_ctx.run → L309-312 守卫（Hidden 判定 + set_visible(false) + return）→ L314 apply_textures；守卫在 paint/present/request_redraw 之前 |
+| crates/modules/palette/src/bin/palette_checks.rs | E2E 探针 `keyword_highlight` + `click_hide_before_capture` + main 分发 + usage | ✓ VERIFIED | L2095 check_keyword_highlight（jt→filtered[0] + tuichu→filtered[1] + ACCENT 像素断言）；L2299 check_click_hide_before_capture（基线 is_visible()==Some(true) + stage 3 is_visible()==Some(false)/counter==0/Destroy + stage 4 无二次 Destroy）；L2048 accent_pixels_in_row_band；L2518-2519 分发臂；L2522 usage |
+| crates/modules/palette/tests/integration.rs | 测试 11/12（`palette_keyword_highlight` / `palette_click_hide_before_capture`，#[ignore] + run_check 接线） | ✓ VERIFIED | L176-180 + L191-195；本 verifier 桌面会话实跑 12/12 PASS |
 
 ### Key Link Verification
 
 | From | To | Via | Status | Details |
 |------|----|----|---------|---------|
-| 过滤输入 / 状态转变（set_input/set_executing/finalize-Err） | sync_window_geometry | geometry_revision 修订计数比对（帧内快照无法察觉帧外转变——WR-01 根因） | ✓ WIRED | session.rs 四类递增 + lib.rs:332-337 比对；探针三阶段高度实测 |
-| 窗口高度变化 | 窗口位置 | 只 request_inner_size 绝不 set_outer_position（GAP-3 根因：重居中使顶边下移） | ✓ WIRED | lib.rs:486-505 函数体内无 set_outer_position（源码断言确认）；探针 outer_position 精确相等 |
-| sync_window_geometry | session 帧缓冲 | resize_framebuffer(new_size)（WR-02：增高后新区域可绘制） | ✓ WIRED | lib.rs:504；探针帧缓冲覆盖断言 |
-| ScrollArea 内容 ui 行矩形 | 行高亮/文字绘制 | 同一内容 ui 的 ui.painter()（两坐标系仅在偏移 0 时重合的根因类消除） | ✓ WIRED | ui.rs:332 row_painter；探针 hover_px_above_band=0 |
-| 鼠标点击（egui-winit 转换） | execute::execute | ui.interact(Sense::click) → resp.clicked()（原 hover-only 永无 click） | ✓ WIRED | ui.rs:397-419；探针点击→Executing 断言 |
-| winit ModifiersChanged | session.modifiers | session.set_modifiers(m.state())（winit 0.30 KeyEvent 无 modifiers 字段） | ✓ WIRED | lib.rs:237-239；探针真实事件注入断言 |
-| KeyboardInput + session.modifiers | on_palette_key 路由 | Ctrl+P/N 守卫臂（control_key() + 字符 p/n）等价 move_selection(∓1) | ✓ WIRED | lib.rs:438-447；单测 5 个 + 探针环绕断言 |
-| 无 Ctrl 的普通 P/N | egui TextEdit | 守卫不满足 → 路由返回 false → 事件透传 | ✓ WIRED | lib.rs:473 `_ => false`；单测 plain_p_without_ctrl_is_not_consumed |
-| 窗口首事件（ensure_winit_state） | OS IME 输入通道 | window.set_ime_allowed(true)（首次窗口）+ egui-winit 去抖 | ⚠️ PARTIAL | session.rs:500 仅首次窗口；重唤出窗口无任何 set_ime_allowed 调用路径（BLOCKER gap） |
-| winit Ime::Preedit/Commit | session.set_input | egui-winit State::on_window_event → egui Event::Ime → TextEdit → changed() | ✓ WIRED | 探针实跑 input=="截图"、Filtering |
-| 拼音查询（tuichu 等） | 内置命令 | fuzzy-matcher 关键词梯队（keywords 纯数据，与 jietu 同机制） | ✓ WIRED | command.rs 数据 + 探针 filtered [1] 断言 |
+| filter.rs keyword 梯队分支（fuzzy_indices） | Match.keyword_hit | `fuzzy_indices(kw, &query)` 返回 (score, indices)——取最高分 keyword 及字符索引存入 Match | ✓ WIRED | L122-140；单测断言 jietu/[0,3] + 4 拼音 keyword 全携带 |
+| ui.rs draw_command_row | keyword tag LayoutJob（ACCENT 命中字符） | keyword_tag_job 对 indices 着色 #FF6000；「 · 」分隔符 TEXT_DIM（KEYWORD_TAG_SEP 推导字节） | ✓ WIRED | L434-443 合并进 desc_job；单测偏移 4/7 正确；E2E 16/51 ACCENT px |
+| ui.rs resp.clicked() → execute → session.close() → Hidden | lib.rs 帧循环 Hidden 守卫 → window.set_visible(false) | egui_ctx.run 返回后检查 state==Hidden → 同步隐藏 + return（跳过 paint/present/request_redraw） | ✓ WIRED | L309-312；探针 stage 3 经真实闭包断言 is_visible()==Some(false) 先于 gated 读屏 |
 
 ### Data-Flow Trace (Level 4)
 
 | Artifact | Data Variable | Source | Produces Real Data | Status |
 |----------|---------------|-------|--------------------|--------|
-| sync_window_geometry | physical_h / last_height | ui::window_height 几何表 × 修订计数触发 | Yes — 探针实测 256/640/704 物理高度达成、位置零漂移 | ✓ FLOWING |
-| resize_framebuffer | framebuffer Pixmap | 窗口物理尺寸驱动重分配 | Yes — 探针断言 Pixmap 尺寸 == 窗口物理尺寸全程覆盖 | ✓ FLOWING |
-| draw_command_row 交互 | resp (egui Response) | egui hit-test（prev_pass.widgets） | Yes — 探针帧缓冲 94049 高亮像素、点击→Executing→runner 一次 | ✓ FLOWING |
-| on_palette_key Ctrl 判定 | modifiers | winit ModifiersChanged 事件流 → session | Yes — 探针真实事件注入 → control_key() 断言 | ✓ FLOWING |
-| ensure_winit_state | ime_allowed 标志 | 首次窗口事件一次性置位 | Yes（首次）— 探针断言置位；**重唤出不流动（无复位、无重开）** | ⚠️ PARTIAL |
-| 拼音 keywords | command.keywords | 编译期静态数据 → fuzzy-matcher | Yes — 探针 tuichu→filtered [1] | ✓ FLOWING |
+| Match.keyword_hit | keyword_hit: Option<KeywordHit> | `fuzzy_indices(kw, &query)` 遍历 cmd.keywords（Command 注册表静态数据） | Yes — 5 个拼音 keyword 全部携带索引（单测）；E2E 渲染路径实测 ACCENT 像素 | ✓ FLOWING（**03-10**） |
+| keyword_tag_job 渲染 | desc_job 合并 sections | Match.keyword_hit → char_indices_to_byte_ranges → LayoutJob | Yes — 单测偏移 4/7 + CJK 段 4..10；E2E jt/tuichu 阶段帧缓冲实测 #FF6000 像素 | ✓ FLOWING（**03-10**） |
+| Hidden 帧循环守卫 | session.state() | 点击帧内 execute→session.close() 置 Hidden | Yes — 探针 stage 3 断言 state==Hidden + is_visible()==Some(false) + 读屏 counter==0 | ✓ FLOWING（**03-10**） |
 
 ### Behavioral Spot-Checks
 
 | Behavior | Command | Result | Status |
 |----------|---------|--------|--------|
-| 全 workspace 单测 | cargo nextest run --workspace | 228 passed / 18 skipped | ✓ PASS |
-| palette 包单测 | cargo nextest run -p mybox-palette | 66 passed / 9 skipped（含 5 个 Ctrl 路由 + 2 个修饰键 + 2 个行交互新测试） | ✓ PASS |
-| core command 单测 | cargo nextest run -p mybox-core command | 11/11（含 builtin_keywords_include_pinyin_aliases） | ✓ PASS |
-| 编译健康 | cargo check --workspace | exit 0，无 warning | ✓ PASS |
-| E2E 集成测试（桌面会话，本 verifier 实跑） | cargo test -p mybox-palette --test integration -- --ignored | **10/10 PASS**（3.52s） | ✓ PASS |
+| 全 workspace 单测 | `cargo nextest run --workspace` | **233 passed / 0 failed**（20 skipped） | ✓ PASS |
+| palette filter 单测 | `cargo nextest run -p mybox-palette filter::` | 10/10（含 keyword_hit 4 项新断言） | ✓ PASS |
+| palette ui 单测 | `cargo nextest run -p mybox-palette ui::` | 8/8（含 keyword_tag_job 偏移 4/7 + CJK 无 panic） | ✓ PASS |
+| 编译健康 | `cargo check --workspace` | exit 0，0 warning | ✓ PASS |
+| E2E 二进制构建 | `cargo build -p mybox-palette --bin palette_checks` | exit 0 | ✓ PASS |
+| E2E 集成测试（桌面会话，本 verifier 实跑） | `cargo test -p mybox-palette --test integration -- --ignored` | **12/12 PASS** in 3.67s（keyword_highlight: jt 16 px / tuichu 51 px；click_hide_before_capture OK） | ✓ PASS |
 
 ### Probe Execution
 
 | Probe | Command | Result | Status |
-|-------|---------|--------|---------|
-| summon_render | bash palette_checks（经 integration.rs） | exit 0 | ✓ PASS |
-| fuzzy_navigation_execute | 同上 | exit 0 | ✓ PASS |
-| capture_hides_first | 同上 | exit 0 | ✓ PASS |
-| five_summon_esc_no_residue | 同上 | exit 0 | ✓ PASS |
-| consecutive_summon_close | 同上 | exit 0 | ✓ PASS（GAP-1 回归） |
-| glyph_shape | 同上 | exit 0，实测 bbox=1200x288 non_bg=24248 diff=45942 kinds=53 **aa_spread=242** | ✓ PASS（GAP-2 回归） |
-| position_stable_on_filter | 同上 | exit 0（三阶段 outer_position == 原点精确相等） | ✓ PASS（GAP-3 回归，本 verifier 实跑） |
-| hover_click_alignment | 同上 | exit 0，实测 **hover_px_in_band=94049 / hover_px_above_band=0 / text_px_in_band=16549** @2x | ✓ PASS（GAP-4/5 回归，本 verifier 实跑） |
-| ctrl_pn_navigation | 同上 | exit 0（真实 ModifiersChanged 注入 + 环绕断言） | ✓ PASS（GAP-6 回归，本 verifier 实跑） |
-| ime_commit_updates_input | 同上 | exit 0（ime_allowed 标志 + 中文 Commit + tuichu 拼音过滤） | ✓ PASS（GAP-7 首次唤出路径，本 verifier 实跑） |
-
-**探针覆盖声明核实：** 各探针的 doc 注释覆盖声明与实现一致（position/hover/ctrl/ime 均明示合成事件注入边界、OS 物理输入留待人工）。**核实发现的覆盖洞：** ime_commit_updates_input 的覆盖声明未承诺重唤出窗口——而 WR-01 恰在重唤出窗口上使 GAP-7 失效（探针通过但缺陷真实存在）。
+|-------|---------|--------|--------|
+| keyword_highlight（03-10 新增） | `cargo test -p mybox-palette --test integration -- --ignored` | jt 阶段 16 ACCENT px + tuichu 阶段 51 ACCENT px（行 1 带内），ESC→Destroy→Hidden 收尾 | ✓ PASS（**Gap 1 关闭**，本 verifier 实跑） |
+| click_hide_before_capture（03-10 新增） | 同上 | stage 0 基线可见 → stage 3 Hidden + is_visible()==Some(false) + counter==0 + Destroy 入队 → stage 4 counter==1 无二次 Destroy | ✓ PASS（**Gap 2 关闭**，本 verifier 实跑） |
+| 既有 10 探针（summon_render/fuzzy_navigation_execute/capture_hides_first/five_summon_esc_no_residue/consecutive_summon_close/glyph_shape/position_stable_on_filter/hover_click_alignment/ctrl_pn_navigation/ime_commit_updates_input） | 同上 | 10/10 PASS | ✓ PASS（回归） |
 
 ### Requirements Coverage
 
 | Requirement | Source Plan | Description | Status | Evidence |
 |-------------|-------------|-------------|--------|---------|
-| PAL-01 | 03-01 / 03-03 | 用户按全局快捷键唤出命令面板浮窗 | ✓ SATISFIED | REQUIREMENTS.md:39 `[x]` Complete；consecutive_summon_close 实跑 |
-| PAL-02 | 03-01 / 03-04 | 命令面板列出所有模块注册的命令 | ✓ SATISFIED | `[x]` Complete；glyph_shape aa_spread=242 实跑 |
-| PAL-03 | 03-02 / 03-05 / 03-08 | 输入关键词模糊过滤命令列表 | ✓ SATISFIED | `[x]` Complete；fuzzy_navigation_execute + ime_commit_updates_input（拼音路径）实跑 |
-| PAL-04 | 03-02 / 03-05 / 03-06 / 03-07 | 方向键导航选择，回车执行 | ✓ SATISFIED | `[x]` Complete；hover_click_alignment + ctrl_pn_navigation 实跑（点击/Ctrl+P/N 强化） |
-| PAL-05 | 03-02 | ESC 关闭命令面板 | ✓ SATISFIED | `[x]` Complete；five_summon_esc_no_residue 实跑 |
+| PAL-01 | 03-01 / 03-03 / 03-09 | 用户按全局快捷键唤出命令面板浮窗 | ✓ SATISFIED | REQUIREMENTS.md:39 `[x]` Complete；consecutive_summon_close + ime_commit_updates_input 实跑 |
+| PAL-02 | 03-01 / 03-04 | 命令面板列出所有模块注册的命令 | ✓ SATISFIED | REQUIREMENTS.md:40 `[x]` Complete；glyph_shape aa_spread=242 实跑 |
+| PAL-03 | 03-02 / 03-05 / 03-08 / 03-09 / **03-10** | 输入关键词模糊过滤命令列表 | ✓ SATISFIED | REQUIREMENTS.md:41 `[x]` Complete；fuzzy_navigation_execute + **keyword_highlight（keyword 梯队全路径高亮）** 实跑 |
+| PAL-04 | 03-02 / 03-05 / 03-06 / 03-07 / **03-10** | 方向键导航选择，回车执行 | ✓ SATISFIED | REQUIREMENTS.md:42 `[x]` Complete；hover_click_alignment + ctrl_pn_navigation + **click_hide_before_capture（点击路径时序与 Enter 一致）** 实跑 |
+| PAL-05 | 03-02 / **03-10** | ESC 关闭命令面板 | ✓ SATISFIED | REQUIREMENTS.md:43 `[x]` Complete；five_summon_esc_no_residue + click_hide_before_capture Destroy 配对实跑 |
 
-**追踪表状态：** REQUIREMENTS.md 中 PAL-01..PAL-05 全部 `[x]` 且 traceability 表全部 Complete。8 张 PLAN 的 `requirements:` 前端字段合计认领 PAL-01×2 / PAL-02×2 / PAL-03×3 / PAL-04×4 / PAL-05×1 —— **无 orphaned requirements**（Phase 3 声明的 5 个 ID 全部被 plan 认领）。ROADMAP Phase 3 标 completed、8 plans 全部 `[x]`。
+**追踪表状态：** REQUIREMENTS.md 中 PAL-01..PAL-05 全部 `[x]` 且 traceability 表全部 Complete。10 张 PLAN 的 `requirements:` 字段合计认领覆盖全部 5 个 ID（03-10 新增认领 PAL-03/PAL-04 强化 keyword 梯队高亮 + 点击路径时序；PAL-05 经 03-10 探针补充覆盖）——**无 orphaned requirements**。
 
 ### Anti-Patterns Found
 
-| File | Line | Pattern | Severity | Impact |
-|------|------|---------|----------|---------|
-| crates/modules/palette/src/session.rs | 130-149, 478-503 | IME 显式开启 per-session 一次性：ime_allowed 不复位、winit_state 不重建 → 重唤出窗口永不 set_ime_allowed(true) | 🛑 Blocker | REVIEW WR-01：ESC/热键关闭后重唤出（核心循环）中文输入法死亡。egui-winit 0.30 去抖源码已验证（仅 allow_ime 翻转调用）；探针只覆盖首次唤出 |
-| crates/modules/palette/src/lib.rs | 486-504 | Hidden 态窗口高度 0 → max(1) 1px resize + 1px 帧缓冲重分配 | ⚠️ Warning | REVIEW WR-04：capture.start 点击执行路径可达（同帧 revision 触发），瞬态（Destroy 随后排出）、下次 summon 重装帧缓冲，无持久损坏 |
-| crates/modules/palette/src/lib.rs | 176 vs 491 | 初始高度 all.len() 与帧循环 len().max(1) 不一致（零命令 80 vs 128） | ⚠️ Warning | REVIEW WR-02：潜伏缺陷（生产恒有 4 内置命令，不可达）；修复 = 两处统一 max(1) |
-| crates/mybox-core/src/app.rs | 518-521 + session.rs | 窗口创建失败仅日志，session 永久 pending_close 卡死 | ⚠️ Warning | REVIEW WR-03（重申）：deferred Phase 4，生产正常路径不可达 |
-| crates/mybox-core/src/command.rs | 239-245 | run_command 线程 spawn expect panic（主线程） | ℹ️ Info | IN-01：资源耗尽场景；deferred Phase 4 错误处理打磨 |
-| crates/modules/palette/src/session.rs | 481-490 vs lib.rs:288-292 | 锁顺序相反（state→egui_ctx vs egui_ctx→state） | ℹ️ Info | IN-02：今日无嵌套无死锁；修复 WR-01 时建议顺手加不变式文档 |
-| crates/modules/palette/src/bin/palette_checks.rs | 82-124 | realize_window 注释不准确（旧窗口由 harness WM 持有不销毁） | ℹ️ Info | IN-03：测试脚手架注释级，不影响断言 |
-| crates/mybox-core/src/app.rs | 145-146 | config_dir().unwrap_or_default() 静默降级空路径 | ℹ️ Info | IN-04：open_config/open_log 在配置目录失败时报错体验差 |
-| crates/modules/palette/src/ui.rs | 175-207 | 64 字符截断在帧重建时可见回弹（无提示） | ℹ️ Info | IN-05：SPEC 约束合规但 UX 粗糙；建议 char_limit |
+**本轮关闭：**
 
-无 TBD/FIXME/XXX 债务标记（blocker 扫描零命中）；PLACEHOLDER 命中均为 UI 颜色 token（输入占位文本色），非 stub。空 match 臂均为枚举穷举合法分支。
+| ID | File | Line | Pattern | Severity | Status |
+|----|------|------|---------|----------|--------|
+| UAT gap 1 | filter.rs + ui.rs | filter L122-140 / ui L434-443, 487-512 | keyword 梯队命中无数据无渲染（fuzzy_match 仅计分 + keywords 从不显示） | ⚠️ Minor（UAT test 5） | **closed（03-10）**——keyword_hit 数据通道 + keyword tag 渲染 |
+| UAT gap 2 | lib.rs | L309-312 | 点击路径 Destroy 排出延迟与截图读屏竞态（面板被拍进截图） | 🛑 Major（UAT test 11） | **closed（03-10）**——Hidden 守卫 set_visible(false) 同步隐藏 + 早退 |
+| CR-01 | ui.rs | L485-512（修复后） | keyword_tag_job 分隔符硬编码 3 字节→ACCENT 区间左移 1 字节 + CJK 切片 panic | 🛑 Critical（03-REVIEW） | **closed（03-10, commit 32561c8）**——KEYWORD_TAG_SEP + sep_len 推导 + 单测偏移修正 4/7 + CJK 无 panic 测试 |
+
+**仍开放（per 最新 03-REVIEW.md，均为 warning/info，无 blocker；已 deferred Phase 4）：**
+
+| ID | File | Pattern | Severity | Impact / Disposition |
+|----|------|---------|----------|---------------------|
+| WR-01 | crates/mybox-core/src/app.rs | App::create_window 失败仅日志，session 永久 pending_close 卡死 | ⚠️ Warning | 仅创建失败路径可达；deferred Phase 4 plan 04-02 |
+| WR-02 | crates/mybox-core/src/app.rs | on_event/on_event_win 模块回调未包 catch_unwind | ⚠️ Warning | Phase 4 错误处理打磨范围（CR-01 panic 面已消除——CJK keyword 不再 panic） |
+| WR-03 | lib.rs + ui.rs | 零命令 fallback 块 144px 仍被 128px 窗口裁切 | ⚠️ Warning | 生产恒有 ≥4 内置命令不可达；latent |
+| IN-01..IN-05 | — | run_command expect / 锁顺序 / realize_window 注释 / config_dir 降级 / 64 字符回弹 | ℹ️ Info | 均 deferred Phase 4 或文档级 |
+
+**债务标记扫描：** 本轮 5 个被改文件内 `TBD|FIXME|XXX` **0 命中**；`placeholder` 命中仅 ui.rs L78 输入框占位文本注释（合法 UI 元素，非 stub）。无 stub/占位实现。
 
 ### Human Verification Required
 
-以下项目无法在验证进程内程序化完成（OS 物理输入链路 / 真实副作用），待 gap-closure（03-09）后随最终 UAT 执行：
+以下 5 项无法在验证进程内程序化完成（OS 物理链路 / 视觉 / 真实截图 / 进程副作用）——其中 2 项为本轮 03-10 关闭项的最终复验：
 
-1. **UAT 1 重跑（物理热键循环）** — 按 Cmd+Shift+Space 唤出→再按关闭→再唤出 ≥3 轮；执行「开始截图」后再唤出。**Expected:** 每次保持显示不闪退。**Why human:** 探针走 bus 级 summon，OS 热键注册→回调链路只能真人验证。
-2. **UAT 3 重跑（截图时序硬约束）** — 执行「开始截图」，面板先消失、截图画面中绝不含面板。**Expected:** 截图中无面板。**Why human:** 探针只断言入队序，真实截图内容需真人确认。
-3. **UAT 4 重跑（内置命令 OS 副作用）** — 退出/重启/打开配置目录/打开日志。**Expected:** 各自 OS 副作用正确。**Why human:** 进程生命周期/文件管理器无法在验证进程内执行。
-4. **UAT 10 重跑（真实输入法）** — **首次唤出**输入中文确认候选窗出现；**ESC 关闭后重唤出再输入中文**。**Expected:** 两次都能输入中文（重唤出场景当前代码可证失败——03-09 修复后此步转为关闭确认）。**Why human:** OS 候选窗出现/交互无法合成。
-5. **（可选）视觉/手感走查** — UAT 2/6/7/8/9 已由探针在真实窗口像素级断言（高亮颜色与位置、环绕、点击执行），剩余纯手感项（#FF6000 高亮观感、物理鼠标/键盘手感）可选复验。
+### 1. UAT 5 重跑（keyword 高亮——03-10 关闭项）
+
+**Test:** 输入 jt / jietu / tuichu / peizhi / chongqi / rizhi，观察命令行 description 行尾的「 · {keyword}」标签
+**Expected:** 命中命令排前，且标签中命中的拼音字符（如 j/t）以 #FF6000 橙色高亮
+**Why human:** E2E 探针已断言帧缓冲存在 ACCENT 像素（16/51 px），但命中字符最终着色位置（CR-01 修复后应为 j/t 而非 e）只能肉眼确认
+
+### 2. UAT 11 重跑（鼠标点击截图时序——03-10 关闭项）
+
+**Test:** 在面板中用鼠标点击「开始截图」
+**Expected:** 面板先关闭、截图画面中绝不含面板本身（与 Enter 路径一致）
+**Why human:** 探针经合成指针事件 + gated 模拟读屏断言 is_visible()==Some(false) 先于读屏；真实截图的屏幕内容只能人工查看
+
+### 3. UAT 1 重跑（物理热键循环）
+
+**Test:** 按 Cmd+Shift+Space 唤出→再按关闭→再唤出 ≥3 轮；执行「开始截图」后再唤出
+**Expected:** 每次保持显示不闪退
+**Why human:** 探针走 bus 级 summon，OS 热键注册→回调链路只能真人验证
+
+### 4. UAT 4 重跑（内置命令 OS 副作用）
+
+**Test:** 在面板中依次执行退出/重启/打开配置目录/打开日志
+**Expected:** 各自 OS 副作用正确（进程生命周期/文件管理器打开正确位置）
+**Why human:** 进程生命周期/文件管理器无法在验证进程内执行
+
+### 5. UAT 10 重跑（真实输入法——首次唤出 AND ESC 关闭后重唤出）
+
+**Test:** 首次唤出输入中文确认候选窗出现；ESC 关闭后重唤出再输入中文
+**Expected:** 两次都能输入中文，候选窗两次都出现（03-09 GAP-8 代码层已关闭）
+**Why human:** OS 候选窗出现/交互无法合成；探针仅注入合成 Ime 事件
 
 ### Gaps Summary
 
-**本轮 1 个 BLOCKER gap（REVIEW WR-01），其余 6 个 GAP 全部关闭：**
+**本轮 0 个开放代码 gap。** UAT 的 2 个留存 issue + 03-REVIEW 的 CR-01 全部关闭：
 
-- **GAP-3/4/5/6 关闭且双层锁定**（代码 + 探针，本 verifier 实跑复验）：位置漂移（去重居中 + 修订计数 + 帧缓冲伸缩）、hover 错位与点击无效（content-ui 坐标系 + Sense::click 接线）、Ctrl+P/N 缺失（ModifiersChanged 事件流 + 守卫臂）。REVIEW WR-01/WR-02（03-05 计划标称的几何 warning）已随 03-05 一并关闭。
-- **GAP-7 部分关闭**：拼音前缀发现路径（数据层，全场景生效）与首次唤出 IME（代码层 + 探针）关闭；**重唤出 IME 未关闭**——03-08 的显式开启是 per-session 一次性，egui-winit 去抖在复用 State 时永不重开，winit macOS 每窗口默认禁用 IME，ESC 关闭后重唤出无法输入中文。该缺陷代码可证（本 verifier 独立验证 vendored egui-winit 0.30 源码 lib.rs:848-852 与 session.rs 无复位路径），且现有探针集 10/10 全绿仍无法捕获（覆盖洞：探针只测首次唤出）。
-- **修复建议（小而确定）**：summon() 复位 `ime_allowed = false` 与 `winit_state = None`（2 行），使每次窗口创建重新执行显式开启并重建 State；探针增加重唤出阶段锁定；顺带同函数修复 WR-04（Hidden 早退）与 WR-02（max(1) 统一）。
+- **UAT gap 1 关闭（keyword 梯队高亮，minor）**：filter.rs `Match.keyword_hit`/`KeywordHit` 数据通道（fuzzy_indices 取最高分 keyword + 字符索引）+ ui.rs 「 · {keyword}」行尾标签渲染（命中字符 #FF6000）。单测覆盖全部 5 个拼音 keyword 命中索引；E2E 探针 jt/tuichu 两阶段帧缓冲 ACCENT 像素实测。
+- **UAT gap 2 关闭（点击截图时序，major）**：lib.rs Hidden 帧循环守卫在点击帧内 `set_visible(false)` 同步隐藏（Destroy 排出与截图读屏前已离屏）并跳过本帧 paint/present/request_redraw。E2E 探针断言 is_visible()==Some(false) + gated 读屏 counter==0 + 无二次 Destroy——Enter 与点击两路径时序收敛。
+- **CR-01 关闭（03-REVIEW Critical）**：KEYWORD_TAG_SEP const + sep_len() 推导字节数，单测偏移修正（j→4、t→7）+ CJK 无 panic 锁定（commit 32561c8）。本 verifier 复核提交 diff 与代码现状一致。
 
-质量账本：228 单测（03-05..03-08 新增 13 个）、10/10 E2E 探针（新增 4）、cargo check 零 warning、REQUIREMENTS.md PAL-01..05 全 Complete、无 TBD/FIXME/XXX。4 项 warning（WR-03/WR-04/WR-02/IN-01）中 WR-03 已 deferred Phase 4，WR-04/WR-02 建议并入 gap-closure 计划一并修复。
+**质量账本：** 233 单测 / 12 E2E 探针（12/12 桌面会话实跑）/ cargo check+build 全绿无 warning；REQUIREMENTS.md PAL-01..05 全 Complete；无 TBD/FIXME/XXX；10/10 plans 全部 `[x]`。仍开放 3 warning + 5 info（均非 blocker，已 deferred Phase 4 或 latent 不可达）。
 
-**推进建议：** 以 frontmatter `gaps` 结构化条目驱动 `/gsd-plan-phase --gaps` 生成 03-09 计划（IME 重唤出复位 + 探针重唤出阶段 + WR-04/WR-02 顺带修复）；03-09 关闭后，剩余 4 项人工验收（UAT 1/3/4/10）通过即本阶段 passed。
+**推进建议：** 自动化层面 Phase 3 已达成全部 5 条成功标准 + 25/25 truths，UAT 15 项中 13 项 pass + 2 项 issue 已代码层关闭并具备 E2E 回归。剩余 5 项人工 UAT（1/4/5/10/11）执行通过即可将本阶段状态从 `human_needed` 推进至 `passed`。
+
+**说明：** 03-UAT.md / 03-HUMAN-UAT.md / .planning/debug/ 两个 debug 文件的 gap 状态与 fix 落地标记属 orchestrator 所有（03-10 SUMMARY 明示留待 orchestrator 更新），本 verifier 不修改。
 
 ---
 
-_Verified: 2026-08-15T09:05:45Z_
+_Verified: 2026-08-17T15:30:00Z_
 _Verifier: the agent (gsd-verifier)_
