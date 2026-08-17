@@ -478,20 +478,27 @@ fn highlight_job(text: &str, indices: &[usize], size: f32, base: egui::Color32) 
 /// job because `LayoutJob.text` is a pub field whose `sections` byte ranges
 /// index into it — the caller slices `tag` per section and appends each into
 /// the description job (one merged galley, same line, no new row).
+/// Separator between the description and the rendered keyword tag. Deliberately
+/// a const so the byte length is derived, never hardcoded: " · " is 4 bytes
+/// (space + U+00B7 middle dot 2 bytes + space), and a stale literal would shift
+/// every ACCENT byte range left and mis-slice CJK keywords (CR-01).
+const KEYWORD_TAG_SEP: &str = " · ";
+
 fn keyword_tag_job(keyword: &str, indices: &[usize], size: f32) -> (String, egui::text::LayoutJob) {
-    let tag = format!(" · {keyword}");
+    let tag = format!("{KEYWORD_TAG_SEP}{keyword}");
+    let sep_len = KEYWORD_TAG_SEP.len();
     let fmt = |color: egui::Color32| egui::TextFormat {
         color,
         font_id: egui::FontId::new(size, egui::FontFamily::Proportional),
         ..Default::default()
     };
     let mut job = egui::text::LayoutJob::default();
-    // " · " is bytes 0..3 of `tag`; the keyword starts at byte 3.
-    job.append(&tag[0..3], 0.0, fmt(TEXT_DIM));
-    let mut cursor = 3;
+    // The separator is bytes 0..sep_len of `tag`; the keyword starts there.
+    job.append(&tag[0..sep_len], 0.0, fmt(TEXT_DIM));
+    let mut cursor = sep_len;
     for (start, end) in char_indices_to_byte_ranges(keyword, indices) {
-        let start = start + 3;
-        let end = end + 3;
+        let start = start + sep_len;
+        let end = end + sep_len;
         if start > cursor {
             job.append(&tag[cursor..start], 0.0, fmt(TEXT_DIM));
         }
@@ -663,7 +670,8 @@ mod tests {
         // Gap 1 (UAT test 5): the keyword tag " · jietu" marks the query-hit
         // chars ACCENT (#FF6000) and everything else TEXT_DIM — color only,
         // the UI-SPEC L63 invariant. "jt" hits j at char 0 and t at char 3 of
-        // "jietu" → tag byte offsets 3 and 6 (the " · " separator is 0..3).
+        // "jietu" → tag byte offsets 4 and 7 (the " · " separator is bytes
+        // 0..4: space 1 + U+00B7 2 + space 1 — never hardcode 3, CR-01).
         let (tag, job) = keyword_tag_job("jietu", &[0, 3], FONT_SIZE_DESC);
         assert_eq!(tag, " · jietu", "tag = separator + keyword");
         let sections: Vec<(usize, egui::Color32)> = job
@@ -672,10 +680,10 @@ mod tests {
             .map(|s| (s.byte_range.start, s.format.color))
             .collect();
         assert_eq!(sections[0], (0, TEXT_DIM), "the ' · ' separator is TEXT_DIM");
-        assert_eq!(sections[1], (3, ACCENT), "j (char 0 of jietu) is ACCENT");
-        assert_eq!(sections[2], (4, TEXT_DIM), "the 'ie' between hits is TEXT_DIM");
-        assert_eq!(sections[3], (6, ACCENT), "t (char 3 of jietu) is ACCENT");
-        assert_eq!(sections[4], (7, TEXT_DIM), "the trailing 'u' is TEXT_DIM");
+        assert_eq!(sections[1], (4, ACCENT), "j (char 0 of jietu) is ACCENT");
+        assert_eq!(sections[2], (5, TEXT_DIM), "the 'ie' between hits is TEXT_DIM");
+        assert_eq!(sections[3], (7, ACCENT), "t (char 3 of jietu) is ACCENT");
+        assert_eq!(sections[4], (8, TEXT_DIM), "the trailing 'u' is TEXT_DIM");
         // Empty indices → no ACCENT anywhere: the separator + keyword runs are
         // all TEXT_DIM (Gap 1 plan: "全 TEXT_DIM 无 ACCENT").
         let (plain_tag, plain) = keyword_tag_job("jietu", &[], FONT_SIZE_DESC);
@@ -687,6 +695,29 @@ mod tests {
         assert!(
             plain.sections.iter().all(|s| s.format.color != ACCENT),
             "no ACCENT without indices"
+        );
+    }
+
+    #[test]
+    fn keyword_tag_job_cjk_keyword_does_not_panic_and_marks_correct_chars() {
+        // CR-01 lock: "截图" is 6 UTF-8 bytes. With the separator hardcoded as
+        // 3 bytes, byte ranges shift left and slicing lands mid-char → panic.
+        // The sep_len-derived prefix must keep CJK keywords on char boundaries.
+        let (tag, job) = keyword_tag_job("截图", &[0, 1], FONT_SIZE_DESC);
+        assert_eq!(tag, " · 截图");
+        let sections: Vec<(usize, egui::Color32)> = job
+            .sections
+            .iter()
+            .map(|s| (s.byte_range.start, s.format.color))
+            .collect();
+        // " · " is bytes 0..4; 截 is bytes 4..7; 图 is bytes 7..10. Both chars
+        // hit → one merged ACCENT run 4..10 (char_indices_to_byte_ranges merges
+        // contiguous runs).
+        assert_eq!(sections[0], (0, TEXT_DIM), "separator is TEXT_DIM");
+        assert_eq!(sections[1], (4, ACCENT), "the CJK keyword run is ACCENT");
+        assert!(
+            sections.iter().all(|&(s, _)| s == 0 || s == 4),
+            "only separator and keyword runs present, got {sections:?}"
         );
     }
 

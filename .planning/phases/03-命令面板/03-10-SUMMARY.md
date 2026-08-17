@@ -106,8 +106,18 @@ Each task was committed atomically:
 
 ---
 
-**Total deviations:** 1 auto-fixed (1 bug fix)
-**Impact on plan:** 局部变量化修复，无行为变化、无 scope creep——仅消除编译器警告。
+**2. [CR-01 - Critical] `keyword_tag_job` 分隔符字节偏移错误（review 后修复）**
+- **Found during:** post-execution code review (`gsd-code-review 03`)
+- **Issue:** `format!(" · {keyword}")` 的「 · 」分隔符实际是 **4 字节**（space 1 + U+00B7 中点 2 + space 1），实现却硬编码 3。后果：(a) 每个 ACCENT byte_range 左移 1 字节——"jt"→"jietu" 高亮到错误字符（命中字符 `j`/`t` 保持暗色，高亮落在不可见空格与 `e` 上），直接破坏本计划核心交付（UAT 测试 5）；(b) CJK keyword（如「截图」）在非 char boundary 切片 → `byte index is not a char boundary` panic，且运行于无 catch_unwind 的 on_event_win 闭包内，可杀死事件循环。原单测（ui.rs keyword_tag_job_marks_matched_chars_accent）**断言了错误偏移作为正确**，E2E 探针仅计数「>0 ACCENT 像素」位置盲——12/12 集成测试全绿而缺陷照常出货。
+- **Fix:** 引入 `const KEYWORD_TAG_SEP: &str = " · ";`，用 `sep_len()` 推导前缀字节数（杜绝硬编码）；修正单测为正确字节偏移（j→4、t→7）；新增 `keyword_tag_job_cjk_keyword_does_not_panic_and_marks_correct_chars` 锁定 CJK 无 panic。
+- **Files modified:** crates/modules/palette/src/ui.rs（keyword_tag_job + 2 单测）
+- **Verification:** `cargo nextest run -p mybox-palette ui::` 8/8 通过；`cargo nextest run --workspace` 233/233 通过；`cargo check --workspace` 零 warning
+- **Committed in:** `fix(03-10): correct keyword-tag byte offset (CR-01)`（review 后追加提交）
+
+---
+
+**Total deviations:** 2（1 自动修复 + 1 评审后 Critical 修复）
+**Impact on plan:** CR-01 为关键缺陷——修复后命中字符高亮位置正确（UAT 测试 5 的可见正确性）且 CJK keyword 不再 panic；E2E 探针「>0 ACCENT 像素」断言不受影响（高亮仍存在，仅位置纠正）。
 
 ## Issues Encountered
 - **mybox-palette lib 测试 flaky（环境性，非本计划引入）：** 全量 `cargo nextest run -p mybox-palette -p mybox-core` 首轮 5 个 hotkey/window 测试失败（hotkey_toggle_summon_creates_floating_window 等），隔离重跑 5/5 通过，全量重跑 154/154 通过——global-hotkey 注册在 154 测试并行下竞争导致时序抖动。与 Task 4 改动无关（仅改 bin + ignored 测试）。
@@ -134,5 +144,6 @@ None - 无外部服务配置要求（E2E 探针运行仅需桌面会话与屏幕
 ## Self-Check: PASSED
 - 5/5 source files exist (filter.rs, ui.rs, lib.rs, palette_checks.rs, integration.rs)
 - SUMMARY.md exists
-- 4/4 task commits found (9c40064, 2c5f2a3, d6bdd4a, 20f11a0)
-- Verification: nextest 154/154, workspace check clean, ignored integration 12/12
+- 6/6 task commits found (9c40064, 2c5f2a3, d6bdd4a, 20f11a0, + CR-01 fix)
+- Verification: nextest 233/233, workspace check clean, ignored integration 12/12
+- CR-01 byte-offset fix: ui 8/8, CJK keyword no-panic test added
