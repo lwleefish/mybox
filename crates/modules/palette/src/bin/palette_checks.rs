@@ -2483,18 +2483,44 @@ fn check_click_hide_before_capture() -> Result<(), String> {
                                 .into(),
                         );
                     }
-                    match h.handle.try_recv() {
-                        Some(WindowRequest::Destroy(id)) => {
-                            if Some(id) != h.created_id {
-                                return Err(format!(
-                                    "the click must destroy the created window \
-                                     ({id} != {:?})",
-                                    h.created_id
-                                ));
+                    // Drain the request queue deterministically: close()
+                    // enqueues the Destroy synchronously inside the click
+                    // frame (execute → session.close → windows.destroy), so a
+                    // bounded drain loop must reach it WITHOUT relying on
+                    // further RedrawRequested dispatches. On Windows a hidden
+                    // window stops dispatching WM_PAINT (request_redraw →
+                    // RedrawWindow is a no-op for hidden windows), which
+                    // stalled the old one-request-per-event poll forever (the
+                    // 04-01 CI watchdog); macOS keeps dispatching redraws
+                    // after orderOut, which is why the probe only failed on
+                    // Windows. Redraw stragglers from earlier stages sit ahead
+                    // of the Destroy in the FIFO queue and are dropped here.
+                    let mut destroyed = None;
+                    loop {
+                        match h.handle.try_recv() {
+                            Some(WindowRequest::Destroy(id)) => {
+                                destroyed = Some(id);
+                                break;
                             }
+                            Some(req) => {
+                                eprintln!(
+                                    "palette_checks click_hide_before_capture: drained \
+                                     straggler {}",
+                                    request_name(Some(&req))
+                                );
+                            }
+                            None => break,
                         }
-                        // Drain Redraw stragglers; keep polling.
-                        _ => return Ok(()),
+                    }
+                    match destroyed {
+                        Some(id) if Some(id) == h.created_id => {}
+                        other => {
+                            return Err(format!(
+                                "the click must destroy the created window \
+                                 (queue drained to {other:?}, created {:?})",
+                                h.created_id
+                            ));
+                        }
                     }
                     let _ = release_tx.send(());
                     stage = 4;
