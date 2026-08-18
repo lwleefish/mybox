@@ -94,8 +94,14 @@ impl PaletteHarness {
             Arc::new(el.create_window(attrs).map_err(|e| format!("create window: {e}"))?);
         let winit_id = window.id();
         let id = self.wm.next_id();
-        let renderer = TinySkiaSoftbufferRenderer::new(Arc::clone(&window))
+        let mut renderer = TinySkiaSoftbufferRenderer::new(Arc::clone(&window))
             .map_err(|e| format!("renderer: {e}"))?;
+        // Windows softbuffer requires an explicit surface resize before the
+        // first `buffer_mut` (win32 backend panics "Must set size of surface");
+        // macOS tolerates the missing resize. Mirrors production's
+        // Resized -> resize contract so the first present is always sized.
+        let size = window.inner_size();
+        renderer.resize(size.width, size.height);
         let kind = spec.kind;
         self.wm.register(
             id,

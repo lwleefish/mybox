@@ -57,7 +57,13 @@ impl ApplicationHandler for OverlayHarness {
         let window = Arc::new(el.create_window(attrs).expect("create overlay window"));
         let winit_id = window.id();
         let id = self.wm.next_id();
-        let renderer = TinySkiaSoftbufferRenderer::new(Arc::clone(&window)).expect("renderer");
+        let mut renderer = TinySkiaSoftbufferRenderer::new(Arc::clone(&window)).expect("renderer");
+        // Windows softbuffer requires an explicit surface resize before the
+        // first `buffer_mut` (win32 backend panics "Must set size of surface");
+        // macOS tolerates the missing resize. Mirrors production's
+        // Resized -> resize contract so the first present is always sized.
+        let size = window.inner_size();
+        renderer.resize(size.width, size.height);
         let kind = self.spec.kind;
         self.wm.register(
             id,
