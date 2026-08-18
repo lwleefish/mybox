@@ -1,0 +1,58 @@
+# .github/workflows/windows-ci.yml
+# Source: 组合 dtolnay/rust-toolchain README + nexte.st/docs + rustprojectprimer.com/ci/github
+# 第三方 action 全部 commit SHA pin（T-4-01，04-RESEARCH Pitfall 5）；dependabot 自动更新
+name: windows-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # D-04: 只用 CI 编译 Windows target（宿主即 x86_64-pc-windows-msvc，无需额外 target 安装）
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install nextest
+        uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
+
+      # D-04 + D-02: 编译验证（显式 --target 明确验证 Windows 目标）
+      - name: Build (Windows target)
+        run: cargo build --target x86_64-pc-windows-msvc --locked
+
+      # D-02: 单测
+      - name: Unit tests
+        run: cargo nextest run --locked
+
+      # D-02/D-03: headless 探针（窗口创建 + 合成事件 + 能力探测 skip）
+      - name: Capture headless probes
+        shell: bash
+        run: |
+          for check in overlay_capture drag_selection esc_destroy enter_clipboard; do
+            echo "== capture_checks $check =="
+            cargo run -p mybox-capture --bin capture_checks -- "$check" || exit 1
+          done
+
+      - name: Palette headless probes
+        shell: bash
+        run: |
+          for check in summon_render fuzzy_navigation_execute capture_hides_first \
+                       five_summon_esc_no_residue consecutive_summon_close glyph_shape \
+                       position_stable_on_filter hover_click_alignment ctrl_pn_navigation \
+                       ime_commit_updates_input keyword_highlight click_hide_before_capture; do
+            echo "== palette_checks $check =="
+            cargo run -p mybox-palette --bin palette_checks -- "$check" || exit 1
+          done

@@ -1,0 +1,18 @@
+# .github/dependabot.yml — T-4-01 供应链自动更新（SHA pin 的配套）
+# github-actions: 更新 SHA-pin 的第三方 action 引用
+# cargo: 每周组内合并依赖更新
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo-deps:
+        patterns:
+          - "*"
