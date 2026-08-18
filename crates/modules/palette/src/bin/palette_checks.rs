@@ -2056,28 +2056,49 @@ fn check_ime_commit_updates_input() -> Result<(), String> {
 
 // ─── Check 11: keyword-tier tag highlight (Gap 1 / UAT test 5, 03-10) ───────
 
-/// Count exact ACCENT (#FF6000) pixels inside row 1's band (logical y
-/// 68..116 — the input box 12..60 + 8px gap, 48px rows) of the session
-/// framebuffer. The keyword tag's matched glyphs (e.g. " · jietu"'s j/t)
-/// render the pure ACCENT color in their interiors (opaque glyph coverage →
-/// premultiplied == straight) — the Gap 1 render evidence (UAT test 5).
-fn accent_pixels_in_row_band(h: &PaletteHarness, scale: f64) -> usize {
+/// Count ACCENT-ish (#FF6000 ± tolerance) pixels and their y-extent.
+///
+/// The keyword tag's matched glyphs paint pure ACCENT in their interiors
+/// (opaque coverage → premultiplied == straight); the tolerance absorbs
+/// per-platform rasterization differences (exact #FF6000 matching was
+/// macOS-calibrated). Returns `(band_count, full_frame_count, min_y, max_y)`
+/// — band = row 1 (logical y 68..116: input box 12..60 + 8px gap, 48px rows);
+/// the full-frame diagnostics distinguish "tag not painted at all" from
+/// "painted at a different y than macOS".
+fn accent_pixels_in_frame(
+    h: &PaletteHarness,
+    scale: f64,
+) -> (usize, usize, Option<usize>, Option<usize>) {
     let (width, height, data) = h.session.with_framebuffer(|fb| match fb {
         Some(p) => (p.width(), p.height(), p.data().to_vec()),
         None => (0, 0, vec![]),
     });
     let y_top = (68.0 * scale).round() as usize;
     let y_bottom = (116.0 * scale).round() as usize;
-    let mut n = 0usize;
-    for y in y_top..y_bottom.min(height as usize) {
+    let mut band = 0usize;
+    let mut full = 0usize;
+    let mut min_y = None;
+    let mut max_y = None;
+    for y in 0..height as usize {
         for x in 0..width as usize {
             let i = (y * width as usize + x) * 4;
-            if data[i] == 0xFF && data[i + 1] == 0x60 && data[i + 2] == 0x00 && data[i + 3] > 0 {
-                n += 1;
+            // ACCENT (255, 96, 0) ± tolerance; excludes white text (G≈255),
+            // the #202020 card (R<224) and any dim tag-tint blend (R<224).
+            if data[i + 3] > 0
+                && data[i] >= 0xE0
+                && (0x40..=0x80).contains(&data[i + 1])
+                && data[i + 2] <= 0x20
+            {
+                full += 1;
+                min_y = Some(min_y.map_or(y, |m: usize| m.min(y)));
+                max_y = Some(max_y.map_or(y, |m: usize| m.max(y)));
+                if (y_top..y_bottom).contains(&y) {
+                    band += 1;
+                }
             }
         }
     }
-    n
+    (band, full, min_y, max_y)
 }
 
 /// Real-window keyword-tier highlight probe (PAL-03 / Gap 1 / UAT test 5,
@@ -2197,17 +2218,17 @@ fn check_keyword_highlight() -> Result<(), String> {
                             s.filtered()
                         ));
                     }
-                    let accent = accent_pixels_in_row_band(h, scale);
+                    let (accent, full, min_y, max_y) = accent_pixels_in_frame(h, scale);
                     if accent == 0 {
                         return Err(format!(
                             "jt must render #FF6000 accent pixels in row 1's band \
-                             (the \" · jietu\" keyword tag) — measured {accent} \
-                             ACCENT px @scale {scale}"
+                             (the \" · jietu\" keyword tag) — measured {accent} band / \
+                             {full} frame px @scale {scale} y-range {min_y:?}..{max_y:?}"
                         ));
                     }
                     eprintln!(
                         "palette_checks keyword_highlight: jt stage measured \
-                         {accent} ACCENT px in row 1's band"
+                         {accent} ACCENT px in row 1's band ({full} frame px)"
                     );
                     s.set_input("tuichu");
                     stage = 2;
@@ -2227,17 +2248,17 @@ fn check_keyword_highlight() -> Result<(), String> {
                             s.filtered()
                         ));
                     }
-                    let accent = accent_pixels_in_row_band(h, scale);
+                    let (accent, full, min_y, max_y) = accent_pixels_in_frame(h, scale);
                     if accent == 0 {
                         return Err(format!(
                             "tuichu must render #FF6000 accent pixels in row 1's band \
-                             (the \" · tuichu\" keyword tag) — measured {accent} \
-                             ACCENT px @scale {scale}"
+                             (the \" · tuichu\" keyword tag) — measured {accent} band / \
+                             {full} frame px @scale {scale} y-range {min_y:?}..{max_y:?}"
                         ));
                     }
                     eprintln!(
                         "palette_checks keyword_highlight: tuichu stage measured \
-                         {accent} ACCENT px in row 1's band"
+                         {accent} ACCENT px in row 1's band ({full} frame px)"
                     );
                     press_key(&s, &h.handle, &ui_lock, Key::Named(NamedKey::Escape));
                     stage = 3;
