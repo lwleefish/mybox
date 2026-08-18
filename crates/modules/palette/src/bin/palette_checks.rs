@@ -257,6 +257,35 @@ impl ApplicationHandler<AppEvent> for PaletteHarness {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
+        // Windows stops dispatching RedrawRequested for hidden windows
+        // (WM_PAINT is not delivered to hidden windows, so request_redraw →
+        // RedrawWindow is a no-op there), which would stall poll stages that
+        // wait on shared state — e.g. stage 4 of click_hide_before_capture,
+        // whose gated runner only releases after the click already hid the
+        // window (04-01 CI watchdog). macOS keeps dispatching redraws after
+        // orderOut, so this drive path is Windows-only in practice. Drive the
+        // script directly with a synthetic RedrawRequested so hidden-window
+        // polling keeps advancing.
+        let hidden = self
+            .window
+            .as_ref()
+            .and_then(|w| w.is_visible())
+            .map(|v| !v)
+            .unwrap_or(false);
+        if hidden {
+            let mut driver = self.driver.take();
+            let result = match &mut driver {
+                Some(d) => d(self, el, WindowEvent::RedrawRequested),
+                None => Ok(()),
+            };
+            self.driver = driver;
+            if let Err(e) = result {
+                self.result = Some(Err(e));
+            }
+            if self.result.is_some() {
+                el.exit();
+            }
+        }
     }
 }
 
