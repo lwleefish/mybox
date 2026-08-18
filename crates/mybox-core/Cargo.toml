@@ -33,12 +33,12 @@ pollster = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 # "objc2-quartz-core" feature gates NSView::layer() (needed by
 # `window::round_floating_corners`).
-objc2-app-kit = { version = "0.2.2", features = ["NSView", "NSWindow", "objc2-quartz-core"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSView", "NSWindow", "objc2-quartz-core"] }
 # C6: NSWindow contentView layer corner rounding (see
 # `window::round_floating_corners`). MUST stay on the 0.2.2 line — CALayer has
 # to be the same objc2 version as the NSView it comes from or the ObjC class
 # caches mismatch (the same discipline as elevate_overlay_window's lock note).
-objc2-quartz-core = { version = "0.2.2", features = ["CALayer"] }
+objc2-quartz-core = { version = "0.3.2", features = ["CALayer"] }
 
 # Note: the #[ignore] display/integration tests (tests/integration.rs) and the
 # display_checks bin (src/bin/display_checks.rs) use winit + tiny-skia, which
