@@ -80,11 +80,20 @@ impl PaletteHarness {
 
     /// Create the winit window for the pending spec and register it with the
     /// self-managed WindowManager (OverlayHarness shape, 02-04). Replaces any
-    /// previous window (dropping it closes it — its Destroy was already
-    /// asserted by the check). Also pairs the session window id through the
-    /// spec's `on_created` callback, which is what production's
-    /// `App::create_window` does via `spec.on_created` (GAP-1 fix).
+    /// previous window: destroy the previous round's window via the
+    /// WindowManager before re-registering (IN-03) — `wm.register` retains an
+    /// Arc, so merely dropping `self.window` would leave the old palette
+    /// window alive (and visible) for the whole check duration. Also pairs
+    /// the session window id through the spec's `on_created` callback, which
+    /// is what production's `App::create_window` does via `spec.on_created`
+    /// (GAP-1 fix).
     fn realize_window(&mut self, el: &ActiveEventLoop) -> Result<(), String> {
+        // IN-03: destroy the previous round's window — `wm.register` retains
+        // an Arc, so merely dropping `self.window` would leave the old palette
+        // window alive (and visible) for the whole check duration.
+        if let Some(prev) = self.created_id.take() {
+            self.wm.destroy(prev);
+        }
         let spec = self
             .pending_spec
             .as_ref()
@@ -2085,15 +2094,31 @@ fn check_ime_commit_updates_input() -> Result<(), String> {
 
 // ─── Check 11: keyword-tier tag highlight (Gap 1 / UAT test 5, 03-10) ───────
 
+/// IN-06: named layout geometry — band top = input box (SP_MD 12..60)
+/// + 8px gap (SP_SM), band bottom = one 48px row later (SP_2XL).
+/// Derived from ui.rs's SP_* so a layout change breaks the build here
+/// instead of silently shifting the band (CR-01 lesson).
+const ROW_BAND_TOP_LOGICAL: f64 =
+    (mybox_palette::ui::SP_MD + mybox_palette::ui::SP_2XL + mybox_palette::ui::SP_SM) as f64; // 12+48+8 = 68
+const ROW_BAND_BOTTOM_LOGICAL: f64 = ROW_BAND_TOP_LOGICAL + mybox_palette::ui::SP_2XL as f64; // 68+48 = 116
+
+/// The exact ACCENT token (UI-SPEC #FF6000) — ui.rs's ACCENT constant.
+const ACCENT_RGB: (u8, u8, u8) = (0xFF, 0x60, 0x00);
+
 /// Count ACCENT-ish (#FF6000 ± tolerance) pixels and their y-extent.
 ///
 /// The keyword tag's matched glyphs paint pure ACCENT in their interiors
 /// (opaque coverage → premultiplied == straight); the tolerance absorbs
 /// per-platform rasterization differences (exact #FF6000 matching was
-/// macOS-calibrated). Returns `(band_count, full_frame_count, min_y, max_y)`
-/// — band = row 1 (logical y 68..116: input box 12..60 + 8px gap, 48px rows);
-/// the full-frame diagnostics distinguish "tag not painted at all" from
-/// "painted at a different y than macOS".
+/// macOS-calibrated — 04-01 CI: Windows AA spread differs, so the scan is
+/// tolerant around ACCENT_RGB). Returns `(band_count, full_frame_count,
+/// min_y, max_y)` — band = row 1 (logical y 68..116: input box 12..60 +
+/// 8px gap, 48px rows); the full-frame diagnostics distinguish "tag not
+/// painted at all" from "painted at a different y than macOS".
+///
+/// IN-06: presence-only assertion — it cannot detect an x/y offset inside
+/// the band (CR-01 lesson); position blindness is a documented limitation,
+/// not a fix target (REVIEW "at minimum" tier).
 fn accent_pixels_in_frame(
     h: &PaletteHarness,
     scale: f64,
@@ -2102,8 +2127,8 @@ fn accent_pixels_in_frame(
         Some(p) => (p.width(), p.height(), p.data().to_vec()),
         None => (0, 0, vec![]),
     });
-    let y_top = (68.0 * scale).round() as usize;
-    let y_bottom = (116.0 * scale).round() as usize;
+    let y_top = (ROW_BAND_TOP_LOGICAL * scale).round() as usize;
+    let y_bottom = (ROW_BAND_BOTTOM_LOGICAL * scale).round() as usize;
     let mut band = 0usize;
     let mut full = 0usize;
     let mut min_y = None;

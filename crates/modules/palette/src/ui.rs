@@ -66,6 +66,22 @@ pub fn window_height(state: PaletteState, visible: usize) -> f32 {
     }
 }
 
+/// WR-03: the effective summon/frame height — the zero-command
+/// fallback block (12+48+8+64+12 = 144px) must fit the window, so an
+/// empty command list uses the Empty geometry instead of the 128px
+/// 1-row Idle height that clipped it.
+pub fn effective_window_height(
+    state: PaletteState,
+    visible: usize,
+    command_count: usize,
+) -> f32 {
+    if command_count == 0 {
+        window_height(PaletteState::Empty, 0)
+    } else {
+        window_height(state, visible)
+    }
+}
+
 /// Dark fixed theme (D-09) + palette overrides. Called once at module
 /// construction, before the first frame.
 pub fn configure_egui_ctx(ctx: &egui::Context) {
@@ -187,7 +203,12 @@ pub fn draw(
                         ))
                         .text_color(TEXT)
                         .frame(false)
-                        .margin(egui::Margin::ZERO),
+                        .margin(egui::Margin::ZERO)
+                        // IN-05 (04-02): 64-char input cap at the widget level
+                        // (the user's IME/text input is truncated in-edit, not
+                        // just at session.set_input; session.set_input's take
+                        // truncation remains as the headless backstop).
+                        .char_limit(filter::MAX_QUERY_LEN),
                 );
                 // Placeholder (UI-SPEC copywriting + exact #6E6E6E token — egui's
                 // hint color is derived from weak_text_color, so paint it manually).
@@ -606,6 +627,18 @@ mod tests {
         assert_eq!(window_height(PaletteState::Executing, 12), 592.0, "cap at 10 rows");
         // Hidden: 0.
         assert_eq!(window_height(PaletteState::Hidden, 10), 0.0);
+    }
+
+    #[test]
+    fn effective_height_zero_commands_uses_empty() {
+        // WR-03: a zero-command list must fit the fallback block (144px),
+        // never the 128px 1-row Idle height that clipped it.
+        assert_eq!(effective_window_height(PaletteState::Idle, 0, 0), 144.0);
+        assert_eq!(effective_window_height(PaletteState::Filtering, 0, 0), 144.0);
+        // Non-zero commands fall back to the existing table.
+        assert_eq!(effective_window_height(PaletteState::Idle, 1, 1), 128.0);
+        assert_eq!(effective_window_height(PaletteState::Idle, 4, 4), 272.0);
+        assert_eq!(effective_window_height(PaletteState::Executing, 2, 2), 208.0);
     }
 
     #[test]

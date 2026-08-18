@@ -202,6 +202,22 @@ impl PaletteSession {
             || inner.pending_close
     }
 
+    /// WR-01: creation-failure reset — a summon whose window could not be
+    /// created must leave the session summonable again. `summon()` moved
+    /// the state to Idle with `window_id=None`; the failure never pairs an
+    /// id, so `has_live_window()` would stay true forever (pending_close
+    /// never clears). Reset to Hidden and drop the in-flight state; the
+    /// next toggle summons fresh.
+    pub fn on_create_failed(&self) {
+        let mut inner = self.state.lock().unwrap();
+        inner.state = PaletteState::Hidden;
+        inner.window_id = None;
+        inner.pending_close = false;
+        inner.error = None;
+        // geometry_revision intentionally untouched: no window exists to
+        // sync, and the next summon bumps it anyway.
+    }
+
     /// Close the palette: move to Hidden and return the window id to destroy
     /// (the caller enqueues `WindowRequest::Destroy`). If no window id was
     /// recorded yet but a summon is in flight, `pending_close` is set so the
@@ -490,6 +506,13 @@ impl PaletteSession {
     ///
     /// The winit call happens OUTSIDE the state lock (no lock held across a
     /// winit call), gated once by the `ime_allowed` flag.
+    ///
+    /// **Lock-order invariant (IN-02):** `state` → `egui_ctx` order here. The
+    /// frame loop (`lib.rs` RedrawRequested arm) takes `egui_ctx` first then
+    /// `state` via `ui::draw`. **Never call `ensure_winit_state` /
+    /// `with_winit_state_mut` while holding `egui_ctx()`** — both orders are
+    /// main-thread-only and never nest today; this comment documents the
+    /// invariant so future edits cannot nest them into a deadlock.
     pub fn ensure_winit_state(&self, window: &Arc<winit::window::Window>) {
         let enable_ime = {
             let mut inner = self.state.lock().unwrap();
@@ -766,6 +789,35 @@ mod tests {
         assert!(s.consume_pending_close(), "pending close must be set");
         assert!(!s.consume_pending_close(), "consumed exactly once");
         assert!(!s.has_live_window(), "pairing consumed — nothing live");
+    }
+
+    #[test]
+    fn create_failed_resets_session_and_unwedges() {
+        // WR-01: a summon whose window could not be created must leave the
+        // session summonable again (toggle no longer wedges).
+        let s = PaletteSession::new();
+        let gen1 = s.summon(vec![sample_command("a")]);
+        assert_eq!(s.state(), PaletteState::Idle);
+        assert!(s.has_live_window(), "Idle with no id yet counts as in-flight");
+        s.on_create_failed();
+        assert_eq!(s.state(), PaletteState::Hidden);
+        assert!(!s.has_live_window(), "creation failure must unwedge the session");
+        assert!(s.window_id().is_none());
+        // The next summon succeeds (generation increments) — toggle recovers.
+        let gen2 = s.summon(vec![sample_command("a")]);
+        assert_eq!(gen2, gen1 + 1, "generation must increment on re-summon");
+        assert_eq!(s.state(), PaletteState::Idle);
+    }
+
+    #[test]
+    fn input_limit_truncates_paste() {
+        // IN-05: the 64-char cap enforced at session.set_input (the headless
+        // backstop; the TextEdit char_limit covers the interactive path).
+        let s = PaletteSession::new();
+        s.summon(vec![sample_command("a")]);
+        s.set_input(&"a".repeat(100));
+        assert_eq!(s.input().chars().count(), crate::filter::MAX_QUERY_LEN);
+        assert_eq!(s.input(), "a".repeat(crate::filter::MAX_QUERY_LEN));
     }
 
     #[test]

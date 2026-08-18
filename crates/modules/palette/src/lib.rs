@@ -191,7 +191,10 @@ pub fn summon_palette(
     // — the zero-command case is unreachable in production (≥4 builtins
     // always exist) but the two call sites now agree on 80 instead of
     // diverging into 80 vs 128.
-    let height = ui::window_height(PaletteState::Idle, all.len().max(1));
+    // WR-03 (04-02): zero commands → Empty geometry (144px) so the fallback
+    // block fits; shared with sync_window_geometry via
+    // `ui::effective_window_height`.
+    let height = ui::effective_window_height(PaletteState::Idle, all.len().max(1), all.len());
     let geometry = position::summon_geometry((ui::PANEL_WIDTH, height))?;
     session.summon(all);
     session.install_framebuffer(geometry.inner_size.0, geometry.inner_size.1);
@@ -228,6 +231,9 @@ pub fn build_window_spec(
     let session_draw = Arc::clone(&session);
     // GAP-1 pairing closure: session/windows clones for `on_created`.
     let created_session = Arc::clone(&session);
+    // WR-01: a second Arc clone for the creation-failure callback (the
+    // on_created closure moves the first one in).
+    let failed_session = Arc::clone(&session);
     let created_windows = Arc::clone(&windows);
     // Last physical height applied to the window (the sync gate).
     let last_height = Arc::new(std::sync::Mutex::new(geometry.inner_size.1));
@@ -304,6 +310,8 @@ pub fn build_window_spec(
                     .take_egui_input(window)
             });
             let egui_ctx = session.egui_ctx();
+            // Lock-order invariant (IN-02): egui_ctx → state here — see
+            // ensure_winit_state's doc comment; never nest the opposite order.
             // 03-06 (GAP-5): the click-execute chain — ui::draw threads
             // windows/ui_proxy into the command rows, where a row click routes
             // through execute::execute with the same semantics as Enter.
@@ -406,6 +414,11 @@ pub fn build_window_spec(
                 created_windows.destroy(id);
             }
         })),
+        // WR-01: creation-failure reset — App::create_window invokes this
+        // (take-once) when the OS window or renderer cannot be constructed,
+        // so the session returns to Hidden and the next toggle summons
+        // fresh.
+        on_create_failed: Some(Box::new(move || failed_session.on_create_failed())),
         ..Default::default()
     }
 }
@@ -537,7 +550,8 @@ fn sync_window_geometry(
 ) {
     // WR-04 (03-09): Hidden early-return — see the doc comment above.
     if session.state() == PaletteState::Hidden { return; }
-    let logical_h = ui::window_height(session.state(), session.filtered().len().max(1));
+    let logical_h =
+        ui::effective_window_height(session.state(), session.filtered().len().max(1), session.commands().len());
     let scale = window.scale_factor();
     let physical_h = (logical_h as f64 * scale).round() as u32;
     let mut last = last_height.lock().unwrap();
