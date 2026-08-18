@@ -2,9 +2,10 @@
 //! annotation tool — `ab_glyph` `OutlinedGlyph::draw` coverage compositing, since
 //! tiny-skia has no text module (RESEARCH).
 //!
-//! The font is the macOS system font (A4: `/System/Library/Fonts/Supplemental/
-//! Arial.ttf` — verified present on the dev Mac). Windows font discovery is
-//! deferred to Phase 4.
+//! The font is the platform system font: macOS `/System/Library/Fonts/
+//! Supplemental/Arial.ttf` (A4 — verified present on the dev Mac); Windows
+//! `C:\Windows\Fonts\arial.ttf` with a fallback chain (Phase 4 — same shape as
+//! the palette CJK chain).
 
 use std::sync::OnceLock;
 
@@ -13,17 +14,30 @@ use mybox_core::tiny_skia::{Color, PixmapMut};
 
 /// Load the shared text font, caching it behind a `OnceLock` (A4).
 ///
-/// macOS-first: reads the verified-present system Arial.ttf. A missing or
-/// unparseable font is a hard error on macOS where it is a documented
-/// precondition.
+/// Platform font chain (Phase 4): macOS reads the verified-present system
+/// Arial.ttf; Windows tries Arial → Segoe UI → SimHei. A missing or
+/// unparseable font is a hard error — on macOS it is a documented
+/// precondition, and on Windows the standard font directory must contain at
+/// least one of the chain (all are stock Windows fonts).
 pub fn load_font() -> FontArc {
     static FONT: OnceLock<FontArc> = OnceLock::new();
     FONT.get_or_init(|| {
-        let bytes = std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf")
-            .expect("system font Arial.ttf must be present on macOS (A4)");
-        let font_vec =
-            FontVec::try_from_vec(bytes).expect("Arial.ttf must parse as a TrueType font");
-        FontArc::from(font_vec)
+        #[cfg(target_os = "windows")]
+        let candidates: [&str; 3] = [
+            r"C:\Windows\Fonts\arial.ttf",
+            r"C:\Windows\Fonts\segoeui.ttf",
+            r"C:\Windows\Fonts\simhei.ttf",
+        ];
+        #[cfg(not(target_os = "windows"))]
+        let candidates: [&str; 1] = ["/System/Library/Fonts/Supplemental/Arial.ttf"];
+        for path in candidates {
+            if let Ok(bytes) = std::fs::read(path) {
+                if let Ok(font_vec) = FontVec::try_from_vec(bytes) {
+                    return FontArc::from(font_vec);
+                }
+            }
+        }
+        panic!("no system font available for the size label (tried {candidates:?})");
     })
     .clone()
 }
