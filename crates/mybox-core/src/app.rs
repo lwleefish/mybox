@@ -884,7 +884,17 @@ mod tests {
             // OS window to pass the on_event_win guard — the full run_app harness
             // (palette_checks.rs:370-379) is too heavy for a unit test. The window is
             // never shown or drawn.
-            let event_loop = winit::event_loop::EventLoop::new().expect("event loop");
+            //
+            // winit requires the EventLoop on the actual process main thread on
+            // EVERY platform (nextest runs tests on harness threads); the
+            // Windows builder's `with_any_thread` lifts that restriction.
+            #[cfg(not(target_os = "macos"))]
+            use winit::platform::windows::EventLoopBuilderExtWindows;
+
+            let event_loop = winit::event_loop::EventLoopBuilder::new()
+                .with_any_thread(true)
+                .build()
+                .expect("event loop");
             let window = Arc::new(
                 event_loop
                     .create_window(winit::window::Window::default_attributes())
