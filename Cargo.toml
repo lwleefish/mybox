@@ -32,7 +32,7 @@ ab_glyph = "0.2.32"
 # Phase 3 (03-RESEARCH Package Legitimacy Audit — all [OK], versions verified
 # against the crates.io sparse index + downloaded sources 2026-08-14).
 egui = "0.30.0"          # D-02 lock: 0.30.0 is the ONLY 0.30.x release
-egui-winit = "0.30.0"    # declares winit 0.30.5 → resolves to pinned 0.30.13
+egui-winit = "0.36.1"    # declares winit 0.30.5 → resolves to pinned 0.30.13
 fuzzy-matcher = "0.3.7"
 pollster = "1.0.1"
 objc2-app-kit = "0.3.2"  # already in lock (via winit/xcap) — promoted to direct macOS dep
