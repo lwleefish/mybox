@@ -10,8 +10,8 @@ progress:
   total_phases: 4
   completed_phases: 3
   total_plans: 20
-  completed_plans: 19
-  percent: 80
+  completed_plans: 20
+  percent: 100
 ---
 
 # Project State
@@ -26,8 +26,8 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 04 (跨平台完善) — EXECUTING
-Plan: 1 of 2 — COMPLETE (04-01 全绿)
-Status: Executing Phase 04
+Plan: 2 of 2 — COMPLETE (04-02 全绿)
+Status: Executing Phase 04 (wave 1 done — phase verification pending)
 Last activity: 2026-08-18 -- Phase 04 execution started
 
 Progress: [██████████] 100%
@@ -96,6 +96,12 @@ Recent decisions affecting current work:
 - [Phase 03]: [Phase 03-09]: WR-04 早退置于 last_height 锁段之前—Hidden 态 last_height 不被 1px 值污染，下次 summon 第一帧 Idle sync 不被 *last == physical_h 短路跳过真实首次同步；WR-02 summon_palette 初始高度 all.len().max(1) 与帧循环 max(1) 规则一致
 - [Phase 04]: [04-01]: Windows 验证锁定 GitHub Actions CI（唯一验证途径，D-01）— 仓库 lwleefish/mybox 创建（PUBLIC），分支 master→main，4 个第三方 action SHA-pin（T-4-01）
 - [Phase 04]: [04-01]: Windows 隐藏窗口不派发 WM_PAINT → request_redraw 是 no-op → 探针 poll stage 停摆。通用修复：harness about_to_wait 检测窗口隐藏后合成 RedrawRequested 直接驱动 driver；stage 3 队列改确定性 drain 循环（straggler Redraw 排在 close() 同步入队的 Destroy 之前，不依赖后续事件逐个消费）— 修复落在探针 harness 层，产品代码零改动
+- [Phase 04]: [04-02]: WindowSpec.on_create_failed take-once 回调（WR-01）——失败时无 WindowId 可传，无参回调 + take 防重试双触发；create_window/renderer 双失败路径通知，session 复位 Hidden 恢复可 summon
+- [Phase 04]: [04-02]: dispatch_window_event 自由函数 catch_unwind 隔离模块回调（WR-02）——on_event/on_event_win 均隔离，CR-01 类 panic 不再杀事件循环；真实窗口臂测试在 Windows 需 EventLoopBuilderExtWindows::with_any_thread（winit 全平台主线程限制）
+- [Phase 04]: [04-02]: run_command 失败传播统一 dispatch_completion（IN-01）——Arc<Mutex<Option>> 共享 on_done 保证 worker/spawn-Err 两臂恰好一次；spawn 失败经 UiThreadProxy hop 到 finalize(Err) 渲染 Error 态
+- [Phase 04]: [04-02]: config_dir 失败显式传播（IN-04）——builtin 运行器 Option<PathBuf> bail 带消息，绝不静默打开空路径/CWD 相对路径
+- [Phase 04]: [04-02]: effective_window_height 单一高度入口（WR-03）——零命令 → Empty 144px，summon 与 sync_window_geometry 共用，杜绝两处 diverging
+- [Phase 04]: [04-02]: point_to_physical 纯函数（D-07）——xcap 点坐标 × scale 换算唯一出口，1.0/1.25/1.5/2.0 四 scale + 负坐标用例；compute_geometry @1.5 手算用例锚定高 DPI 一致性
 
 ### Pending Todos
 

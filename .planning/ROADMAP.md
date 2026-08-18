@@ -16,7 +16,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: 框架核心** - 搭建模块化框架基础设施 (completed 2026-08-12)
 - [x] **Phase 2: 截图模块** - 完整截图功能验证框架 (completed 2026-08-13)
 - [x] **Phase 3: 命令面板** - 统一交互入口 (completed 2026-08-15)
-- [ ] **Phase 4: 跨平台完善** - Windows 适配与打磨
+- [x] **Phase 4: 跨平台完善** - Windows 适配与打磨 (completed 2026-08-18)
 
 ## Phase Details
 
@@ -158,8 +158,8 @@ Plans:
 
 Plans:
 
-- [ ] 04-01: Windows 平台适配与测试 — GitHub Actions Windows CI（编译/单测/16 headless 探针）+ Windows CJK 字体 + enter_clipboard 能力门控 + 建仓推送
-- [ ] 04-02: DPI 缩放修复 + 错误处理打磨 — point_to_physical 纯函数 + 多 scale 单测 + compute_geometry @1.5 + Phase 3 遗留 9 项错误债全修（WR-01..03 + IN-01..06）
+- [x] 04-01: Windows 平台适配与测试 — GitHub Actions Windows CI（编译/单测/16 headless 探针）+ Windows CJK 字体 + enter_clipboard 能力门控 + 建仓推送
+- [x] 04-02: DPI 缩放修复 + 错误处理打磨 — point_to_physical 纯函数 + 多 scale 单测 + compute_geometry @1.5 + Phase 3 遗留 9 项错误债全修（WR-01..03 + IN-01..06）
 
 ## Progress
 
@@ -171,4 +171,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 | 1. 框架核心 | 4/4 | Complete   | 2026-08-12 |
 | 2. 截图模块 | 4/4 | Complete   | 2026-08-13 |
 | 3. 命令面板 | 10/10 | Complete   | 2026-08-17 |
-| 4. 跨平台完善 | 0/2 | Not started | - |
+| 4. 跨平台完善 | 2/2 | Complete   | 2026-08-18 |
