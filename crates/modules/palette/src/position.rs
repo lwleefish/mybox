@@ -148,4 +148,32 @@ mod tests {
     fn empty_monitors_returns_none() {
         assert!(compute_geometry(&[], (0.0, 0.0), (600.0, 560.0)).is_none());
     }
+
+    #[test]
+    fn scale_1_5_matches_hand_computed_geometry() {
+        // 150% scale — the Windows 150% DPI case of success criterion 4.
+        // Hand-computed chain: panel logical (600, 560) × 1.5 → (900, 840);
+        // monitor center (960, 540) × 1.5 = (1440, 810); position =
+        // (1440 − 450, 810 − 420) = (990, 390).
+        let g = compute_geometry(&[(0.0, 0.0, 1920.0, 1080.0, 1.5)], (960.0, 540.0), (600.0, 560.0))
+            .expect("geometry computed");
+        assert_eq!(g.inner_size, (900, 840));
+        assert_eq!(g.position, (990, 390));
+    }
+
+    #[test]
+    fn off_center_cursor_keeps_panel_centered_on_monitor_at_1_5() {
+        // A non-center cursor inside the same monitor must not move the panel:
+        // the panel is centered on the MONITOR (not the cursor). With cursor
+        // (300, 200) the monitor center chain is unchanged → same position as
+        // the center-cursor case.
+        let center = compute_geometry(&[(0.0, 0.0, 1920.0, 1080.0, 1.5)], (960.0, 540.0), (600.0, 560.0))
+            .expect("center geometry computed");
+        let off = compute_geometry(&[(0.0, 0.0, 1920.0, 1080.0, 1.5)], (300.0, 200.0), (600.0, 560.0))
+            .expect("off-center geometry computed");
+        assert_eq!(off.inner_size, center.inner_size);
+        assert_eq!(off.position, center.position);
+        assert_eq!(off.inner_size, (900, 840));
+        assert_eq!(off.position, (990, 390));
+    }
 }
