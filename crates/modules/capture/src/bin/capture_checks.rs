@@ -161,6 +161,13 @@ fn check_drag_selection() -> Result<(), String> {
 /// back from the clipboard and assert its dimensions match the selection
 /// (CAP-04). Requires a real display/clipboard session, so it is `#[ignore]`.
 fn check_enter_clipboard() -> Result<(), String> {
+    // 能力探测（D-03）：Windows CI 会话可能无可用剪贴板 — 打开失败即
+    // SKIPPED（非 fail、非静默）。能力探测必须先于任何断言：断言失败 = FAIL，
+    // 能力失败 = SKIP，绝不 fail-to-skip。
+    if std::env::consts::OS == "windows" && arboard::Clipboard::new().is_err() {
+        println!("capture_checks 'enter_clipboard': SKIPPED (no clipboard in CI session)");
+        return Ok(());
+    }
     let session = CaptureSession::new();
     let shot = (
         MonitorGeom {

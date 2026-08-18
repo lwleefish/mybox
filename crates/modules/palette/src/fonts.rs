@@ -42,9 +42,40 @@ pub fn install_cjk_fonts(ctx: &egui::Context) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Windows font discovery is deferred to Phase 4 (UI-SPEC): ASCII-only
-/// fallback for now.
-#[cfg(not(target_os = "macos"))]
+/// Install the system CJK font at the head of the Proportional family
+/// (Windows).
+///
+/// Fallback chain: Microsoft YaHei (primary) → SimHei → SimSun, all in the
+/// standard Windows font directory. The paths are ASSUMED (04-RESEARCH A4) —
+/// the chain covers a miss, and a total failure is a warn-and-continue at the
+/// call site (same as macOS).
+#[cfg(target_os = "windows")]
+pub fn install_cjk_fonts(ctx: &egui::Context) -> anyhow::Result<()> {
+    for path in [
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\simhei.ttf",
+        r"C:\Windows\Fonts\simsun.ttc",
+    ] {
+        if let Ok(bytes) = std::fs::read(path) {
+            let mut defs = egui::FontDefinitions::default();
+            defs.font_data.insert(
+                "cjk".to_string(),
+                egui::FontData::from_owned(bytes).into(),
+            );
+            if let Some(family) = defs.families.get_mut(&egui::FontFamily::Proportional) {
+                // Head of the family — first entry wins for missing glyphs; the
+                // egui defaults stay as ASCII/emoji fallback behind them.
+                family.insert(0, "cjk".to_string());
+            }
+            ctx.set_fonts(defs);
+            return Ok(());
+        }
+    }
+    anyhow::bail!("no CJK font found in C:\\Windows\\Fonts")
+}
+
+/// Other platforms: ASCII-only fallback (no system CJK font loaded).
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn install_cjk_fonts(_ctx: &egui::Context) -> anyhow::Result<()> {
     Ok(())
 }
@@ -79,5 +110,38 @@ mod tests {
             )
         });
         assert!(after, "hiragino (head of Proportional) must provide CJK glyphs");
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_cjk_fonts_populates_font_data() {
+        let ctx = egui::Context::default();
+
+        // Control: egui's built-in fonts carry no CJK glyphs (the Pitfall 5
+        // premise this whole module exists for).
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let before = ctx.fonts(|f| {
+            f.has_glyphs(
+                &egui::FontId::new(14.0, egui::FontFamily::Proportional),
+                "截图",
+            )
+        });
+        assert!(!before, "egui defaults must not have CJK glyphs (test premise)");
+
+        install_cjk_fonts(&ctx).expect("system CJK font must load on Windows");
+
+        // New fonts become active at the start of the next pass.
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let after = ctx.fonts(|f| {
+            f.has_glyphs(
+                &egui::FontId::new(14.0, egui::FontFamily::Proportional),
+                "截图",
+            )
+        });
+        assert!(after, "CJK font (head of Proportional) must provide CJK glyphs");
     }
 }
