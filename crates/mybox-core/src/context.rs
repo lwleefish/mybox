@@ -159,6 +159,16 @@ impl UiThreadProxy {
     pub(crate) fn drain_pending(&self) -> Vec<Box<dyn FnOnce() + Send>> {
         std::mem::take(&mut self.inner.lock().pending)
     }
+
+    /// Non-destructive queue observation for test polling (IN-01).
+    ///
+    /// A `wait_until` predicate must call this — never `drain_pending`, which
+    /// would empty the queue inside the predicate and leave the taken closures
+    /// with nowhere to run.
+    #[cfg(test)]
+    pub(crate) fn pending_count(&self) -> usize {
+        self.inner.lock().pending.len()
+    }
 }
 
 impl Default for UiThreadProxy {

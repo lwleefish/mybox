@@ -142,9 +142,17 @@ impl AppBuilder {
                 command_registry.register(cmd)?;
             }
         }
-        let config_dir = crate::config::config_dir().unwrap_or_default();
-        let log_path = config_dir.join("logs").join("mybox.log");
-        for cmd in crate::command::BuiltinCommands::build(Arc::clone(&bus), config_dir, log_path) {
+        // IN-04: config-dir failure is explicit — the builtins get `None` and
+        // their runners return a descriptive error instead of silently opening
+        // an empty path or a CWD-relative `logs/mybox.log`.
+        let config_dir = crate::config::config_dir();
+        if let Err(e) = &config_dir {
+            log::warn!("config dir unavailable: {e}");
+        }
+        let config_dir_opt = config_dir.ok();
+        let log_path_opt = config_dir_opt.as_ref().map(|d| d.join("logs").join("mybox.log"));
+        for cmd in crate::command::BuiltinCommands::build(Arc::clone(&bus), config_dir_opt, log_path_opt)
+        {
             command_registry.register(cmd)?;
         }
         let commands = Arc::new(command_registry);
@@ -365,9 +373,13 @@ impl App {
         mut spec: WindowSpec,
     ) -> Result<WindowId> {
         let attrs = window_attributes(&spec);
-        let window = el
-            .create_window(attrs)
-            .map_err(|e| MyboxError::Window(format!("create window '{:?}': {e}", spec.kind)))?;
+        let window = match el.create_window(attrs) {
+            Ok(w) => w,
+            Err(e) => {
+                notify_create_failed(&mut spec);
+                return Err(MyboxError::Window(format!("create window '{:?}': {e}", spec.kind)));
+            }
+        };
         match spec.kind {
             WindowKind::Overlay => {
                 // macOS: raise the overlay above the menu bar + Dock so the mask
@@ -399,7 +411,13 @@ impl App {
         let winit_id = window.id();
         let id = self.windows.next_id();
         let window = Arc::new(window);
-        let renderer = (self.renderer_factory)(Arc::clone(&window))?;
+        let renderer = match (self.renderer_factory)(Arc::clone(&window)) {
+            Ok(r) => r,
+            Err(e) => {
+                notify_create_failed(&mut spec);
+                return Err(e);
+            }
+        };
         // Take the per-window creation callback out before the spec moves into
         // `register`. It runs after the state is registered and before the
         // broadcast bus event below.
@@ -446,6 +464,29 @@ fn handle_redraw(state: &mut crate::window::WindowState) {
     }
 }
 
+/// WR-01: invoke the spec's creation-failure callback exactly once.
+/// `take()` so a later retry of the same spec cannot double-fire.
+fn notify_create_failed(spec: &mut WindowSpec) {
+    if let Some(cb) = spec.on_create_failed.take() {
+        cb();
+    }
+}
+
+/// WR-02: dispatch the per-window event callbacks in panic isolation —
+/// a panicking module closure must not kill the event loop (mirrors
+/// `handle_redraw`'s catch_unwind; CR-01 proved a CJK keyword-tier
+/// highlight panic inside `on_event_win` kills the whole loop).
+fn dispatch_window_event(state: &mut crate::window::WindowState, event: &winit::event::WindowEvent) {
+    if let Some(cb) = &state.spec.on_event {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb(event)));
+    }
+    if let Some(cb) = &state.spec.on_event_win {
+        if let Some(w) = &state.window {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb(w, event)));
+        }
+    }
+}
+
 impl winit::application::ApplicationHandler<AppEvent> for App {
     /// The app is live (macOS Accessory). Phase 1 opens no startup window; the
     /// skeleton's test window is created on demand by the hotkey path.
@@ -463,18 +504,14 @@ impl winit::application::ApplicationHandler<AppEvent> for App {
         event: winit::event::WindowEvent,
     ) {
         if let Some(state) = self.windows.get_mut_by_winit(id) {
-            if let Some(cb) = &state.spec.on_event {
-                cb(&event);
-            }
-            // C3: invoke `on_event_win` right after `on_event` (and before the
+            // WR-02: both module callbacks run in panic isolation (the renderer
+            // match below stays outside — the framework's own window handling
+            // must not be masked by a module panic). C3 ordering preserved:
+            // `on_event_win` runs right after `on_event` (and before the
             // renderer match) so the module's egui frame loop runs on
             // RedrawRequested while the framebuffer is fresh — `handle_redraw`
             // presents right after.
-            if let Some(cb) = &state.spec.on_event_win {
-                if let Some(w) = &state.window {
-                    cb(w, &event);
-                }
-            }
+            dispatch_window_event(state, &event);
             match event {
                 winit::event::WindowEvent::RedrawRequested => {
                     handle_redraw(state);
@@ -547,7 +584,7 @@ impl winit::application::ApplicationHandler<AppEvent> for App {
 mod tests {
     use super::*;
     use crate::event::EventFilter;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     /// Inert renderer for headless tests (window-creation logic never draws).
@@ -798,6 +835,134 @@ mod tests {
         match &e.payload {
             EventPayload::Module(v) => assert_eq!(v["menu_id"], "test.open_window"),
             other => panic!("expected Module payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_failed_notifies_callback_once() {
+        // WR-01: the spec's on_create_failed callback must fire exactly once
+        // (take semantics) — a retry of the same spec cannot double-fire.
+        let flag = Arc::new(AtomicBool::new(false));
+        let f = Arc::clone(&flag);
+        let mut spec = WindowSpec {
+            on_create_failed: Some(Box::new(move || {
+                f.store(true, Ordering::SeqCst);
+            })),
+            ..Default::default()
+        };
+        notify_create_failed(&mut spec);
+        assert!(flag.load(Ordering::SeqCst), "callback must fire");
+        assert!(
+            spec.on_create_failed.is_none(),
+            "take() semantics: the callback is consumed by the first invocation"
+        );
+        // Second invocation must be a no-op.
+        notify_create_failed(&mut spec);
+    }
+
+    #[test]
+    fn panic_isolated_event_callbacks() {
+        // WR-02: a panicking module event closure must not kill the event
+        // loop.
+        //
+        // NOTE (deviation, Rule 3): the plan's primary approach (real headless
+        // winit window in this unit test) is IMPOSSIBLE on macOS — winit's
+        // EventLoop requires the actual process main thread
+        // (MainThreadMarker), and nextest/libtest run every test on a
+        // harness-spawned thread (the palette probes sidestep this by running
+        // as `cargo run` binaries). Windows has no such restriction, so the
+        // full real-window variant below runs on Windows CI (the CR-01 path —
+        // the `on_event_win` arm — is fully covered there); the macOS variant
+        // exercises the `on_event` arm headlessly and documents the guard.
+        #[cfg(not(target_os = "macos"))]
+        {
+            // A real headless winit window drives the `on_event_win` arm —
+            // with `window: None` that arm is skipped by the `if let Some(w)`
+            // guard, which would leave the CR-01 CJK-panic path uncovered.
+            #[allow(deprecated)] // winit 0.30 deprecates EventLoop::create_window (the
+            // blessed path is run_app's ActiveEventLoop); this test only needs a real
+            // OS window to pass the on_event_win guard — the full run_app harness
+            // (palette_checks.rs:370-379) is too heavy for a unit test. The window is
+            // never shown or drawn.
+            let event_loop = winit::event_loop::EventLoop::new().expect("event loop");
+            let window = Arc::new(
+                event_loop
+                    .create_window(winit::window::Window::default_attributes())
+                    .expect("window"),
+            );
+            let on_event = Arc::new(AtomicUsize::new(0));
+            let on_event_win = Arc::new(AtomicUsize::new(0));
+            let (a, b) = (Arc::clone(&on_event), Arc::clone(&on_event_win));
+            let spec = WindowSpec {
+                on_event: Some(Box::new(move |_e| {
+                    a.fetch_add(1, Ordering::SeqCst);
+                    panic!("on_event boom");
+                })),
+                on_event_win: Some(Box::new(move |_w, _e| {
+                    b.fetch_add(1, Ordering::SeqCst);
+                    panic!("on_event_win boom");
+                })),
+                ..Default::default()
+            };
+            let mut state = crate::window::WindowState::new(
+                1,
+                WindowKind::Panel,
+                window.id(),
+                Some(window),
+                Box::new(MockRenderer),
+                spec,
+            );
+            let evt = winit::event::WindowEvent::RedrawRequested;
+            // Both arms panic once, each swallowed by catch_unwind.
+            dispatch_window_event(&mut state, &evt);
+            assert_eq!(on_event.load(Ordering::SeqCst), 1, "on_event arm ran and was isolated");
+            assert_eq!(
+                on_event_win.load(Ordering::SeqCst),
+                1,
+                "on_event_win arm ran and was isolated (CR-01 path)"
+            );
+            // Returning normally proves the panics did not propagate out of
+            // dispatch_window_event — the event-loop-survives semantics.
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // macOS: no real winit window is constructible on a test thread
+            // (main-thread requirement). The `on_event` arm runs regardless of
+            // the window guard, so panic isolation is verified headlessly; the
+            // `on_event_win` arm's isolation is verified by the non-macOS
+            // variant (Windows CI — the CR-01 path). The guard itself is
+            // asserted here: with `window: None` the `on_event_win` callback
+            // must not be invoked at all.
+            let on_event = Arc::new(AtomicUsize::new(0));
+            let on_event_win = Arc::new(AtomicUsize::new(0));
+            let (a, b) = (Arc::clone(&on_event), Arc::clone(&on_event_win));
+            let spec = WindowSpec {
+                on_event: Some(Box::new(move |_e| {
+                    a.fetch_add(1, Ordering::SeqCst);
+                    panic!("on_event boom");
+                })),
+                on_event_win: Some(Box::new(move |_w, _e| {
+                    b.fetch_add(1, Ordering::SeqCst);
+                    panic!("on_event_win boom");
+                })),
+                ..Default::default()
+            };
+            let mut state = crate::window::WindowState::new(
+                1,
+                WindowKind::Panel,
+                winit::window::WindowId::from(1u64),
+                None,
+                Box::new(MockRenderer),
+                spec,
+            );
+            let evt = winit::event::WindowEvent::RedrawRequested;
+            dispatch_window_event(&mut state, &evt);
+            assert_eq!(on_event.load(Ordering::SeqCst), 1, "on_event arm ran and was isolated");
+            assert_eq!(
+                on_event_win.load(Ordering::SeqCst),
+                0,
+                "on_event_win arm must be guard-skipped when no window is attached"
+            );
         }
     }
 

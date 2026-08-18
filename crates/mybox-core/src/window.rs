@@ -61,6 +61,15 @@ pub struct WindowSpec {
     /// session). The callback may enqueue a `Destroy` (palette `pending_close`
     /// pairing); the same `about_to_wait` drain pass will execute it.
     pub on_created: Option<Box<dyn Fn(WindowId) + Send + Sync>>,
+    /// Per-window creation-FAILURE callback: invoked by `App::create_window`
+    /// on the main thread whenever the window cannot be created (OS window
+    /// creation error or renderer construction error), so the requesting
+    /// module can reset its state instead of wedging (WR-01 — the palette
+    /// session would otherwise stay `has_live_window()==true` forever).
+    /// No-arg: no `WindowId` exists when creation fails. `Send + Sync`
+    /// matches the other per-window callbacks (may be invoked from the
+    /// `about_to_wait` drain on the main thread).
+    pub on_create_failed: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl Default for WindowSpec {
@@ -79,6 +88,7 @@ impl Default for WindowSpec {
             on_event_win: None,
             on_draw: None,
             on_created: None,
+            on_create_failed: None,
         }
     }
 }

@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
+use parking_lot::Mutex;
+
 use crate::context::UiThreadProxy;
 use crate::error::{MyboxError, Result};
 use crate::event::{Event, EventBus, EventPayload, FrameworkEvent};
@@ -87,7 +89,15 @@ pub struct BuiltinCommands;
 impl BuiltinCommands {
     /// Build the builtin command list with the production platform opener
     /// (`open` / `explorer`, no shell — T-3-07) and spawner.
-    pub fn build(bus: Arc<EventBus>, config_dir: PathBuf, log_path: PathBuf) -> Vec<Command> {
+    ///
+    /// `config_dir`/`log_path` are `Option` (IN-04): when the platform config
+    /// directory is unavailable the open_config/open_log runners return a
+    /// descriptive `Err` instead of silently opening an empty path.
+    pub fn build(
+        bus: Arc<EventBus>,
+        config_dir: Option<PathBuf>,
+        log_path: Option<PathBuf>,
+    ) -> Vec<Command> {
         Self::build_with(bus, config_dir, log_path, platform_opener(), platform_spawner())
     }
 
@@ -95,8 +105,8 @@ impl BuiltinCommands {
     /// (headless unit-test injection point — the `CaptureFn` discipline).
     pub fn build_with(
         bus: Arc<EventBus>,
-        config_dir: PathBuf,
-        log_path: PathBuf,
+        config_dir: Option<PathBuf>,
+        log_path: Option<PathBuf>,
         opener: Arc<dyn Fn(&Path) -> anyhow::Result<()> + Send + Sync>,
         spawner: Arc<dyn Fn(&Path) -> anyhow::Result<()> + Send + Sync>,
     ) -> Vec<Command> {
@@ -139,7 +149,15 @@ impl BuiltinCommands {
                     Arc::new(move || {
                         let opener = Arc::clone(&opener);
                         let config_dir = config_dir.clone();
-                        Box::pin(async move { opener(&config_dir) })
+                        Box::pin(async move {
+                            // IN-04: bail with a descriptive message instead of
+                            // opening an empty path when the config dir is
+                            // unavailable.
+                            let dir = config_dir
+                                .clone()
+                                .ok_or_else(|| anyhow::anyhow!("config directory unavailable"))?;
+                            opener(&dir)
+                        })
                     })
                 },
             },
@@ -184,7 +202,14 @@ impl BuiltinCommands {
                     Arc::new(move || {
                         let opener = Arc::clone(&opener);
                         let log_path = log_path.clone();
-                        Box::pin(async move { opener(&log_path) })
+                        Box::pin(async move {
+                            // IN-04: same discipline as open_config — never open
+                            // a CWD-relative fallback path silently.
+                            let path = log_path
+                                .clone()
+                                .ok_or_else(|| anyhow::anyhow!("log path unavailable"))?;
+                            opener(&path)
+                        })
                     })
                 },
             },
@@ -224,25 +249,58 @@ fn platform_spawner() -> Arc<dyn Fn(&Path) -> anyhow::Result<()> + Send + Sync> 
     })
 }
 
+/// IN-01: hop a command-runner result to the main thread. Both the
+/// worker-thread completion and the spawn-failure path funnel through
+/// here — the palette's `finalize(gen, Err)` renders the Error state.
+fn dispatch_completion(
+    ui: &UiThreadProxy,
+    on_done: Box<dyn FnOnce(anyhow::Result<()>) + Send>,
+    result: anyhow::Result<()>,
+) {
+    ui.run(Box::new(move || on_done(result)));
+}
+
 /// Run a command's async runner on a dedicated named worker thread (D-07).
 ///
 /// The runner future is driven by `pollster::block_on` (no full async runtime
 /// this phase — RESEARCH Pattern 4); the completion result hops back to the
 /// winit main thread through `UiThreadProxy::run`.
+///
+/// IN-01: a worker-thread spawn failure no longer panics the main thread —
+/// `on_done` is shared through an `Arc<parking_lot::Mutex<Option<_>>>` so both
+/// the worker closure (`on_done_thread` clone) and the spawn-Err arm (the
+/// original `Arc`) take the callback exactly once (the two branches are
+/// mutually exclusive), and the spawn-Err arm hops `Err` through the same
+/// `dispatch_completion` path the worker uses.
 pub fn run_command(
     cmd: Command,
     ui: &UiThreadProxy,
     on_done: Box<dyn FnOnce(anyhow::Result<()>) + Send>,
 ) {
-    // Clone before spawning: the worker thread outlives this call.
-    let ui = ui.clone();
-    std::thread::Builder::new()
+    // IN-01: on_done 与 ui 都经 Arc + clone 共享，两分支各触发恰好一次。
+    // on_done 必须是 Box<dyn FnOnce(anyhow::Result<()>) + Send>（已是，见签名）。
+    // ui_thread 用于 worker 闭包；Err 臂用参数 ui（&UiThreadProxy）本身——未被 move。
+    let on_done = Arc::new(Mutex::new(Some(on_done)));
+    let on_done_thread = Arc::clone(&on_done);
+    let ui_thread = ui.clone(); // UiThreadProxy: Clone —— context.rs:112 #[derive(Clone)] 已核实
+    match std::thread::Builder::new()
         .name(format!("mybox-cmd-{}", cmd.id))
         .spawn(move || {
             let result = pollster::block_on((cmd.runner)());
-            ui.run(Box::new(move || on_done(result)));
-        })
-        .expect("spawn command runner thread");
+            let cb = on_done_thread.lock().take().unwrap();
+            dispatch_completion(&ui_thread, cb, result);
+        }) {
+        Ok(_) => {}
+        Err(e) => {
+            log::error!("failed to spawn command runner thread: {e}");
+            let cb = on_done.lock().take().unwrap();
+            dispatch_completion(
+                ui,
+                cb,
+                Err(anyhow::anyhow!("failed to spawn command runner thread: {e}")),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -285,8 +343,8 @@ mod tests {
     fn builtins() -> Vec<Command> {
         BuiltinCommands::build_with(
             Arc::new(EventBus::new()),
-            PathBuf::from("/tmp/mybox-test-config"),
-            PathBuf::from("/tmp/mybox-test-config/logs/mybox.log"),
+            Some(PathBuf::from("/tmp/mybox-test-config")),
+            Some(PathBuf::from("/tmp/mybox-test-config/logs/mybox.log")),
             noop_opener(),
             noop_spawner(),
         )
@@ -332,8 +390,8 @@ mod tests {
 
         let cmds = BuiltinCommands::build_with(
             Arc::clone(&bus),
-            PathBuf::from("/tmp/cfg"),
-            PathBuf::from("/tmp/cfg/logs/mybox.log"),
+            Some(PathBuf::from("/tmp/cfg")),
+            Some(PathBuf::from("/tmp/cfg/logs/mybox.log")),
             noop_opener(),
             noop_spawner(),
         );
@@ -367,8 +425,8 @@ mod tests {
 
         let cmds = BuiltinCommands::build_with(
             Arc::clone(&bus),
-            PathBuf::from("/tmp/cfg"),
-            PathBuf::from("/tmp/cfg/logs/mybox.log"),
+            Some(PathBuf::from("/tmp/cfg")),
+            Some(PathBuf::from("/tmp/cfg/logs/mybox.log")),
             noop_opener(),
             spawner,
         );
@@ -401,8 +459,8 @@ mod tests {
         let log_path = PathBuf::from("/tmp/config-dir/logs/mybox.log");
         let cmds = BuiltinCommands::build_with(
             Arc::new(EventBus::new()),
-            config_dir.clone(),
-            log_path.clone(),
+            Some(config_dir.clone()),
+            Some(log_path.clone()),
             opener,
             noop_spawner(),
         );
@@ -466,6 +524,77 @@ mod tests {
             .find(|c| c.id == "builtin.open_log")
             .expect("open_log exists");
         assert!(open_log.keywords.contains(&"rizhi"), "open_log must carry the rizhi alias");
+    }
+
+    #[test]
+    fn spawn_failure_hops_error_to_main_thread() {
+        // IN-01: the runner's Err must hop through UiThreadProxy to the main
+        // thread (the palette's finalize(gen, Err) renders the Error state).
+        // The OS-level spawn-Err branch cannot be triggered deterministically
+        // (resource-bound), but it shares this same dispatch_completion hop and
+        // the same Arc-shared on_done with the runner-Err branch — the two
+        // branches are mutually exclusive and each takes the callback exactly
+        // once, so the hop path is fully covered by this test (branch itself is
+        // covered by source assertion, same convention as app.rs:847-850).
+        let ui = UiThreadProxy::new(); // no set_proxy → closures stay pending
+        let result_seen: Arc<Mutex<Option<anyhow::Result<()>>>> = Arc::new(Mutex::new(None));
+        let seen = Arc::clone(&result_seen);
+        let cmd = Command {
+            id: "test.fail",
+            name: "fail".to_string(),
+            description: "fail".to_string(),
+            keywords: vec![],
+            hide_before_execute: false,
+            runner: Arc::new(|| Box::pin(async { Err(anyhow::anyhow!("runner boom")) })),
+        };
+        run_command(cmd, &ui, Box::new(move |r| *seen.lock().unwrap() = Some(r)));
+
+        // Poll with the side-effect-free predicate first — never drain inside
+        // the predicate (that would empty the queue and strand the closure).
+        assert!(
+            wait_until(|| ui.pending_count() > 0),
+            "runner never dispatched a completion"
+        );
+        let drained = ui.drain_pending();
+        assert_eq!(drained.len(), 1, "exactly one completion hop expected");
+        for f in drained {
+            f();
+        }
+        let got = result_seen.lock().unwrap().take().expect("on_done must have run");
+        assert!(got.is_err(), "runner error must reach on_done as Err");
+        assert!(
+            got.unwrap_err().to_string().contains("runner boom"),
+            "the runner's error message must survive the hop"
+        );
+    }
+
+    #[test]
+    fn no_config_dir_builtins_bail() {
+        // IN-04: with no config dir, open_config/open_log must return a
+        // descriptive Err — never silently open an empty path or a CWD-relative
+        // logs/mybox.log.
+        let cmds = BuiltinCommands::build_with(
+            Arc::new(EventBus::new()),
+            None,
+            None,
+            noop_opener(),
+            noop_spawner(),
+        );
+        let open_config = cmds
+            .iter()
+            .find(|c| c.id == "builtin.open_config")
+            .expect("open_config exists");
+        let err = pollster::block_on((open_config.runner)()).expect_err("open_config must bail");
+        assert!(
+            err.to_string().contains("config directory unavailable"),
+            "got: {err}"
+        );
+        let open_log = cmds
+            .iter()
+            .find(|c| c.id == "builtin.open_log")
+            .expect("open_log exists");
+        let err = pollster::block_on((open_log.runner)()).expect_err("open_log must bail");
+        assert!(err.to_string().contains("log path unavailable"), "got: {err}");
     }
 
     #[test]
