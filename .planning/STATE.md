@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: ready_to_plan
-stopped_at: Phase 03 complete (10/10) — ready to discuss Phase 4
-last_updated: 2026-08-17T07:05:26.608Z
-last_activity: 2026-08-17 -- Phase 03 execution started
+status: executing
+stopped_at: Phase 4 context gathered
+last_updated: "2026-08-17T10:34:25.566Z"
+last_activity: 2026-08-17 -- Phase 04 execution started
 progress:
   total_phases: 4
-  completed_phases: 2
-  total_plans: 18
-  completed_plans: 18
-  percent: 50
+  completed_phases: 3
+  total_plans: 20
+  completed_plans: 19
+  percent: 80
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-11)
 
 **Core value:** 一个统一入口、可按自己想法无限扩展的桌面工具箱
-**Current focus:** Phase 4 — 跨平台完善
+**Current focus:** Phase 04 — 跨平台完善
 
 ## Current Position
 
-Phase: 4
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-08-17
+Phase: 04 (跨平台完善) — EXECUTING
+Plan: 1 of 2 — COMPLETE (04-01 全绿)
+Status: Executing Phase 04
+Last activity: 2026-08-18 -- Phase 04 execution started
 
 Progress: [██████████] 100%
 
@@ -94,6 +94,8 @@ Recent decisions affecting current work:
 - [Phase 03]: [Phase 03-09]: GAP-8 修复落点选 summon() 不是 close — 所有 re-summon 都经过 summon，single source of truth，summon 复位 ime_allowed=false + winit_state=None 强制每次新窗口重新走 ensure_winit_state 显式 set_ime_allowed(true) 路径
 - [Phase 03]: [Phase 03-09]: stage 5 Preedit '重新截图' + Commit '截图' 不是计划的 Preedit '重' + Commit '重新截图' — 计划 suggested 的 Commit '重新截图' 在 SkimMatcherV2 模糊匹配开始截图 + 退出应用两条 fake_command 后状态为 Empty 触发 state==Filtering 断言失败；修复保留 '重新截图' 字面量在 Preedit + 注释 + doc 注释中（满足 acceptance literal 与 或等价中文 Ime 注入 允许条件）+ Commit 改 '截图' 与 stage 1 一致匹配 开始截图 name 梯队
 - [Phase 03]: [Phase 03-09]: WR-04 早退置于 last_height 锁段之前—Hidden 态 last_height 不被 1px 值污染，下次 summon 第一帧 Idle sync 不被 *last == physical_h 短路跳过真实首次同步；WR-02 summon_palette 初始高度 all.len().max(1) 与帧循环 max(1) 规则一致
+- [Phase 04]: [04-01]: Windows 验证锁定 GitHub Actions CI（唯一验证途径，D-01）— 仓库 lwleefish/mybox 创建（PUBLIC），分支 master→main，4 个第三方 action SHA-pin（T-4-01）
+- [Phase 04]: [04-01]: Windows 隐藏窗口不派发 WM_PAINT → request_redraw 是 no-op → 探针 poll stage 停摆。通用修复：harness about_to_wait 检测窗口隐藏后合成 RedrawRequested 直接驱动 driver；stage 3 队列改确定性 drain 循环（straggler Redraw 排在 close() 同步入队的 Destroy 之前，不依赖后续事件逐个消费）— 修复落在探针 harness 层，产品代码零改动
 
 ### Pending Todos
 
@@ -123,6 +125,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-17T02:11:18.999Z
-Stopped at: Completed 03-09-PLAN.md
-Resume file: None
+Last session: 2026-08-17T07:36:31.116Z
+Stopped at: Phase 4 context gathered
+Resume file: .planning/phases/04-跨平台完善/04-CONTEXT.md
