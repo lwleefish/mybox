@@ -207,13 +207,24 @@ mod tests {
 
     // INFRA-04 path contract (from 01-01-05): the platform config dir is
     // resolved via directories and the file is <dir>/config.toml.
+    // Per-platform shape (directories 6.0.0): macOS config_dir basename is
+    // 'mybox' (.../Application Support/mybox); Windows config_dir is
+    // %APPDATA%\mybox\config (win.rs appends a literal `config` segment).
     #[test]
     fn config_dir_resolves_to_mybox_dir() {
         let dir = config_dir().expect("config dir must resolve");
+        #[cfg(target_os = "macos")]
         assert_eq!(
             dir.file_name().and_then(|n| n.to_str()),
             Some("mybox"),
-            "config dir basename should be 'mybox', got {:?}",
+            "macOS config dir basename should be 'mybox', got {:?}",
+            dir
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            dir.file_name().and_then(|n| n.to_str()),
+            Some("config"),
+            "Windows config dir basename should be 'config' under 'mybox', got {:?}",
             dir
         );
     }
@@ -222,9 +233,15 @@ mod tests {
     fn config_file_path_contract() {
         let p = config_file_path().expect("config file path must resolve");
         assert_eq!(p.file_name().and_then(|n| n.to_str()), Some("config.toml"));
+        #[cfg(target_os = "macos")]
         assert_eq!(
             p.parent().and_then(|d| d.file_name()).and_then(|n| n.to_str()),
             Some("mybox")
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            p.parent().and_then(|d| d.file_name()).and_then(|n| n.to_str()),
+            Some("config")
         );
         // macOS-specific tail, verified only when running on macOS.
         #[cfg(target_os = "macos")]
