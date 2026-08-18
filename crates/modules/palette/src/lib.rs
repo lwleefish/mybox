@@ -116,6 +116,19 @@ impl Module for PaletteModule {
         // until the loop is live.
         let hotkeys = ctx.hotkeys().clone();
         let hotkey_str = hotkey_from_config(ctx.config());
+        // Windows (D-05 记录的限制): global_hotkey 的 Windows 实现含原生句柄
+        // （*mut c_void），GlobalHotKeyManager 非 Send —— 闭包无法经
+        // UiThreadProxy（Send 闭包 + EventLoopProxy 线程跳转）延迟注册，编译期
+        // E0277。直接注册会因 init 早于 hotkeys.init() 失败 → warn-and-continue；
+        // 框架级修复（HotkeyManager 跨线程化 / 主线程注册钩子）属 Rule 4 级改动，
+        // 不在本 phase 范围（D-05），CI 单测与 headless 探针覆盖其余路径。
+        #[cfg(target_os = "windows")]
+        {
+            if let Err(e) = hotkeys.register_str("toggle_palette", &hotkey_str) {
+                log::warn!("failed to register toggle_palette hotkey: {e}");
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
         ctx.ui().run(Box::new(move || {
             if let Err(e) = hotkeys.register_str("toggle_palette", &hotkey_str) {
                 log::warn!("failed to register toggle_palette hotkey: {e}");
