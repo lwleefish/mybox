@@ -956,6 +956,16 @@ fn glyph_structure(
     (non_bg, Some((min_x, min_y, max_x, max_y)), kinds.len(), aa_spread)
 }
 
+/// Glyph AA discrimination threshold for `aa_spread` (mid-tone stroke-edge
+/// pixels): solid text-color blocks ≈40, real glyphs ≈242 with macOS Hiragino
+/// grayscale AA. Windows YaHei renders with ClearType subpixel AA — edges are
+/// more saturated (one channel near max), so fewer pixels land in the mid-tone
+/// band (measured ≈108); keep a 2x margin over the solid-block baseline there.
+#[cfg(target_os = "windows")]
+const AA_SPREAD_MIN: usize = 80;
+#[cfg(not(target_os = "windows"))]
+const AA_SPREAD_MIN: usize = 120;
+
 /// Real-window glyph rendering probe (PAL-02 / GAP-2 regression, 03-04).
 ///
 /// Drives three frames with `Ime::Commit` injections between them so NEW
@@ -1077,7 +1087,7 @@ fn check_glyph_shape() -> Result<(), String> {
                              a texture-less frame has single digits)"
                         ));
                     }
-                    if aa_spread < 120 {
+                    if aa_spread < AA_SPREAD_MIN {
                         return Err(format!(
                             "input text region shows no glyph stroke antialiasing \
                              ({measured}; solid blocks measured ≈40, real glyphs ≈242)"
