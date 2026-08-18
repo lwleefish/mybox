@@ -30,6 +30,10 @@ jobs:
 
       - name: Install nextest
         uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
+        with:
+          # SHA-pin 下工具名无法从 @<tool> ref 推断（README：@<tool> / tool input 二选一）；
+          # 显式 tool 输入同时把 nextest 版本与 action SHA 绑定（依赖冷却语义）
+          tool: nextest
 
       # D-04 + D-02: 编译验证（显式 --target 明确验证 Windows 目标）
       - name: Build (Windows target)
