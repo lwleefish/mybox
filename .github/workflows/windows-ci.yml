@@ -19,7 +19,7 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # D-04: 只用 CI 编译 Windows target（宿主即 x86_64-pc-windows-msvc，无需额外 target 安装）
       # 注意：dtolnay/rust-toolchain 的 v1 tag 声明 toolchain input 为 required（无默认值），
